@@ -345,7 +345,7 @@ static int __maybe_unused qcom_wdt_suspend(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
+	if (watchdog_active(&wdt->wdd) || watchdog_hw_running(&wdt->wdd))
 		qcom_wdt_stop(&wdt->wdd);
 
 	return 0;
@@ -355,7 +355,7 @@ static int __maybe_unused qcom_wdt_resume(struct device *dev)
 {
 	struct qcom_wdt *wdt = dev_get_drvdata(dev);
 
-	if (watchdog_active(&wdt->wdd))
+	if (watchdog_active(&wdt->wdd) || watchdog_hw_running(&wdt->wdd))
 		qcom_wdt_start(&wdt->wdd);
 
 	return 0;
