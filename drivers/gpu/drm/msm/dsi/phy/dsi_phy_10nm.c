@@ -336,6 +336,10 @@ static int dsi_pll_10nm_vco_prepare(struct clk_hw *hw)
 {
 	struct dsi_pll_10nm *pll_10nm = to_pll_10nm(hw);
 	struct device *dev = &pll_10nm->phy->pdev->dev;
+	u32 initial_ctrl = readl(pll_10nm->phy->base + REG_DSI_10nm_PHY_CMN_CTRL_0);
+	u32 initial_pll = readl(pll_10nm->phy->base + REG_DSI_10nm_PHY_CMN_PLL_CNTRL);
+	u32 initial_status = readl(pll_10nm->phy->pll_base +
+				  REG_DSI_10nm_PHY_PLL_COMMON_STATUS_ONE);
 	int rc;
 
 	dsi_pll_enable_pll_bias(pll_10nm);
@@ -360,7 +364,10 @@ static int dsi_pll_10nm_vco_prepare(struct clk_hw *hw)
 	/* Check for PLL lock */
 	rc = dsi_pll_10nm_lock_status(pll_10nm);
 	if (rc) {
-		DRM_DEV_ERROR(dev, "PLL(%d) lock failed\n", pll_10nm->phy->id);
+		DRM_DEV_ERROR(dev,
+			"PLL(%d) lock failed: rate=%llu initial ctrl=%#x pll=%#x status=%#x\n",
+			pll_10nm->phy->id, pll_10nm->vco_current_rate,
+			initial_ctrl, initial_pll, initial_status);
 		goto error;
 	}
 

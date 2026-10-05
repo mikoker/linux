@@ -1600,6 +1600,10 @@ static void dsi_timeout_status(struct msm_dsi_host *msm_host)
 	status = dsi_read(msm_host, REG_DSI_TIMEOUT_STATUS);
 
 	if (status) {
+		dev_err_ratelimited(&msm_host->pdev->dev,
+			"DSI%d timeout: raw=%#x status0=%#x clock=%d\n",
+			msm_host->id, status, dsi_read(msm_host, REG_DSI_STATUS0),
+			msm_host->mode ? msm_host->mode->clock : 0);
 		dsi_write(msm_host, REG_DSI_TIMEOUT_STATUS, status);
 		msm_host->err_work_state |= DSI_ERR_STATE_TIMEOUT;
 	}
@@ -1629,6 +1633,10 @@ static void dsi_fifo_status(struct msm_dsi_host *msm_host)
 
 	/* fifo underflow, overflow */
 	if (status) {
+		dev_err_ratelimited(&msm_host->pdev->dev,
+			"DSI%d FIFO error: raw=%#x status0=%#x clock=%d\n",
+			msm_host->id, status, dsi_read(msm_host, REG_DSI_STATUS0),
+			msm_host->mode ? msm_host->mode->clock : 0);
 		dsi_write(msm_host, REG_DSI_FIFO_STATUS, status);
 		msm_host->err_work_state |= DSI_ERR_STATE_FIFO;
 		if (status & DSI_FIFO_STATUS_CMD_MDP_FIFO_UNDERFLOW)
