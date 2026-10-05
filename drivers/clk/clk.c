@@ -3846,8 +3846,21 @@ static void clk_core_reparent_orphans_nolock(void)
 		 */
 		if (parent) {
 			/* update the clk tree topology */
-			__clk_set_parent_before(orphan, parent);
-			__clk_set_parent_after(orphan, parent, NULL);
+			if (orphan->prepare_count) {
+				__clk_set_parent_before(orphan, parent);
+				__clk_set_parent_after(orphan, parent, NULL);
+			} else {
+				unsigned long flags;
+
+				/*
+				 * The hardware parent is already selected. There is
+				 * no mux operation or prepare state to migrate, so
+				 * CLK_OPS_PARENT_ENABLE must not start this parent.
+				 */
+				flags = clk_enable_lock();
+				clk_reparent(orphan, parent);
+				clk_enable_unlock(flags);
+			}
 			__clk_recalc_accuracies(orphan);
 			__clk_recalc_rates(orphan, true, 0);
 
