@@ -23,6 +23,12 @@
 #include "gdsc.h"
 #include "reset.h"
 
+/* Diagnostic control: isolate UFS PHY power-domain state loss on suspend. */
+static bool ufs_phy_always_on;
+module_param(ufs_phy_always_on, bool, 0444);
+MODULE_PARM_DESC(ufs_phy_always_on,
+		 "Keep UFS PHY power domain on for suspend diagnostics");
+
 enum {
 	DT_BI_TCXO,
 	DT_BI_TCXO_AO,
@@ -2677,6 +2683,15 @@ static struct gdsc ufs_phy_gdsc = {
 	.pwrsts = PWRSTS_OFF_ON,
 };
 
+static struct gdsc ufs_phy_diagnostic_gdsc = {
+	.gdscr = 0x77004,
+	.pd = {
+		.name = "ufs_phy_gdsc",
+	},
+	.pwrsts = PWRSTS_OFF_ON,
+	.flags = ALWAYS_ON,
+};
+
 static struct gdsc usb30_prim_gdsc = {
 	.gdscr = 0xf004,
 	.pd = {
@@ -2989,6 +3004,11 @@ static int gcc_sm7150_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
 	int ret;
+
+	if (ufs_phy_always_on) {
+		gcc_sm7150_gdscs[UFS_PHY_GDSC] = &ufs_phy_diagnostic_gdsc;
+		dev_info(&pdev->dev, "UFS PHY domain forced on for diagnostics\n");
+	}
 
 	regmap = qcom_cc_map(pdev, &gcc_sm7150_desc);
 	if (IS_ERR(regmap))
