@@ -967,6 +967,8 @@ static int wcd9370_probe(struct sdw_slave *pdev,
 	struct device *dev = &pdev->dev;
 	struct wcd937x_sdw_priv *wcd;
 	u8 master_ch_mask[WCD937X_MAX_SWR_CH_IDS];
+	const char *channel_mapping;
+	unsigned int max_channels;
 	int master_ch_mask_size = 0;
 	int ret, i;
 
@@ -1000,24 +1002,28 @@ static int wcd9370_probe(struct sdw_slave *pdev,
 
 	memset(master_ch_mask, 0, WCD937X_MAX_SWR_CH_IDS);
 
-	if (wcd->is_tx) {
-		master_ch_mask_size = of_property_count_u8_elems(dev->of_node,
-								 "qcom,tx-channel-mapping");
+	channel_mapping = wcd->is_tx ? "qcom,tx-channel-mapping" :
+				      "qcom,rx-channel-mapping";
+	max_channels = wcd->is_tx ? ARRAY_SIZE(wcd937x_sdw_tx_ch_info) :
+				  ARRAY_SIZE(wcd937x_sdw_rx_ch_info);
 
-		if (master_ch_mask_size)
-			ret = of_property_read_u8_array(dev->of_node, "qcom,tx-channel-mapping",
-							master_ch_mask, master_ch_mask_size);
-	} else {
+	if (of_property_present(dev->of_node, channel_mapping)) {
 		master_ch_mask_size = of_property_count_u8_elems(dev->of_node,
-								 "qcom,rx-channel-mapping");
+							     channel_mapping);
+		if (master_ch_mask_size <= 0 || master_ch_mask_size > max_channels ||
+		    master_ch_mask_size > ARRAY_SIZE(master_ch_mask))
+			return dev_err_probe(dev, -EINVAL, "Invalid channel mapping length\n");
 
-		if (master_ch_mask_size)
-			ret = of_property_read_u8_array(dev->of_node, "qcom,rx-channel-mapping",
-							master_ch_mask, master_ch_mask_size);
+		ret = of_property_read_u8_array(dev->of_node, channel_mapping,
+					       master_ch_mask, master_ch_mask_size);
+		if (ret)
+			return dev_err_probe(dev, ret, "Failed to read channel mapping\n");
+
+		for (i = 0; i < master_ch_mask_size; i++) {
+			if (!master_ch_mask[i] || master_ch_mask[i] > 8)
+				return dev_err_probe(dev, -EINVAL, "Invalid channel mapping index\n");
+		}
 	}
-
-	if (ret < 0)
-		dev_info(dev, "Static channel mapping not specified using device channel maps\n");
 
 	if (wcd->is_tx) {
 		pdev->prop.source_ports = GENMASK(WCD937X_MAX_TX_SWR_PORTS, 0);
