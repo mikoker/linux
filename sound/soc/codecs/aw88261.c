@@ -90,15 +90,73 @@ static int aw88261_dev_amppd(struct aw_device *aw_dev, bool amppd)
 				~AW88261_AMPPD_MASK, AW88261_AMPPD_WORKING_VALUE);
 }
 
+/* Attenuation is in 0.125 dB units, including the board profile offset. */
+static int aw88263s_ramp_volume(struct aw_device *aw_dev, unsigned int target,
+				bool fade_out)
+{
+	unsigned int reg_val, volume, delay = fade_out ? 500 : 100;
+	int ret;
+
+	ret = regmap_read(aw_dev->regmap, AW88261_SYSCTRL2_REG, &reg_val);
+	if (ret)
+		return ret;
+	volume = REG_VAL_TO_DB((reg_val & AW88263S_VOL_MASK) >> 6);
+	volume = min_t(unsigned int, volume, AW88261_MUTE_VOL);
+	target = min_t(unsigned int, target, AW88261_MUTE_VOL);
+
+	/* At most 15 six-dB steps, using the downstream fade delays. */
+	while (volume != target) {
+		if (volume < target)
+			volume += min(target - volume,
+				      (unsigned int)AW88261_VOLUME_STEP_DB);
+		else
+			volume -= min(volume - target,
+				      (unsigned int)AW88261_VOLUME_STEP_DB);
+		ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL2_REG,
+					 AW88263S_VOL_MASK, DB_TO_REG_VAL(volume) << 6);
+		if (ret)
+			return ret;
+		usleep_range(delay, delay + 10);
+	}
+	return 0;
+}
+
+static int aw88263s_dev_mute(struct aw_device *aw_dev, bool mute)
+{
+	unsigned int target = aw_dev->volume_desc.init_volume +
+			      aw_dev->volume_desc.ctl_volume;
+	int ret, mute_ret;
+
+	if (mute) {
+		/* Fade while the serial clocks are still running, then hard-mute. */
+		ret = aw88263s_ramp_volume(aw_dev, AW88261_MUTE_VOL, true);
+		mute_ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL2_REG,
+					      AW88263S_HMUTE, AW88263S_HMUTE);
+		return ret ? ret : mute_ret;
+	}
+
+	ret = aw88261_dev_set_volume(aw_dev, AW88261_MUTE_VOL);
+	if (ret)
+		return ret;
+	ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL2_REG,
+				 AW88263S_HMUTE, 0);
+	if (ret)
+		return ret;
+	ret = aw88263s_ramp_volume(aw_dev, target, false);
+	if (ret)
+		regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL2_REG,
+				   AW88263S_HMUTE, AW88263S_HMUTE);
+	return ret;
+}
+
 static int aw88261_dev_mute(struct aw_device *aw_dev, bool is_mute)
 {
 	unsigned int reg = AW88261_SYSCTRL_REG, mask = ~AW88261_HMUTE_MASK;
 	int ret;
 
-	if (aw_dev->chip_id == AW88263S_CHIP_ID) {
-		reg = AW88261_SYSCTRL2_REG;
-		mask = AW88263S_HMUTE;
-	}
+	if (aw_dev->chip_id == AW88263S_CHIP_ID)
+		return aw88263s_dev_mute(aw_dev, is_mute);
+
 	if (is_mute) {
 		ret = regmap_update_bits(aw_dev->regmap, reg, mask, mask);
 		if (ret)
@@ -699,6 +757,9 @@ static int aw88261_dev_stop(struct aw_device *aw_dev)
 	if (!first_err)
 		first_err = ret;
 
+	if (aw_dev->chip_id == AW88263S_CHIP_ID)
+		usleep_range(AW88261_1000_US, AW88261_1000_US + 100);
+
 	/* set power down */
 	ret = aw88261_dev_pwd(aw_dev, true);
 	if (!first_err)
@@ -989,10 +1050,45 @@ static int aw88261_set_tdm_slot(struct snd_soc_dai *dai,
 	return 0;
 }
 
+static int aw88261_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
+{
+	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(dai->component);
+	struct aw_device *aw_dev = aw88261->aw_pa;
+	bool was_muted;
+	int ret = 0;
+
+	if (stream != SNDRV_PCM_STREAM_PLAYBACK ||
+	    aw_dev->chip_id != AW88263S_CHIP_ID)
+		return 0;
+
+	mutex_lock(&aw88261->lock);
+	was_muted = aw88261->mute_st;
+	aw88261->mute_st = !!mute;
+	if (mute) {
+		if (aw_dev->status == AW88261_DEV_PW_ON)
+			ret = aw88261_dev_mute(aw_dev, true);
+	} else if (aw_dev->status == AW88261_DEV_PW_OFF) {
+		/* ASoC calls digital unmute after the CPU DAI has been prepared. */
+		ret = aw88261_start(aw88261);
+	} else if (was_muted) {
+		ret = aw88261_dev_mute(aw_dev, false);
+	}
+	if (ret) {
+		aw88261->mute_st = true;
+		dev_err_ratelimited(aw_dev->dev, "playback %s failed: %d\n",
+				    mute ? "mute" : "unmute", ret);
+	}
+	mutex_unlock(&aw88261->lock);
+
+	return ret;
+}
+
 static const struct snd_soc_dai_ops aw88261_dai_ops = {
 	.set_fmt = aw88261_set_fmt,
 	.hw_params = aw88261_hw_params,
 	.set_tdm_slot = aw88261_set_tdm_slot,
+	.mute_stream = aw88261_mute_stream,
+	.no_capture_mute = 1,
 };
 
 static struct snd_soc_dai_driver aw88261_dai[] = {
@@ -1174,7 +1270,20 @@ static int aw88261_playback_event(struct snd_soc_dapm_widget *w,
 	mutex_lock(&aw88261->lock);
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		ret = aw88261_start(aw88261);
+		if (aw88261->aw_pa->chip_id == AW88263S_CHIP_ID) {
+			if (aw88261->aw_pa->fw_status != AW88261_DEV_FW_OK) {
+				ret = -EINVAL;
+				break;
+			}
+			/* Route changes can power DAPM before Q6AFE starts MI2S. */
+			aw88261->mute_st = true;
+			if (aw88261->aw_pa->status == AW88261_DEV_PW_OFF)
+				ret = aw88261_reg_update(aw88261, aw88261->phase_sync);
+			else
+				ret = aw88261_dev_mute(aw88261->aw_pa, true);
+		} else {
+			ret = aw88261_start(aw88261);
+		}
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		ret = aw88261_dev_stop(aw88261->aw_pa);
