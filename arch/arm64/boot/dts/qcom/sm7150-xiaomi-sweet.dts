@@ -74,7 +74,7 @@
 		};
 	};
 
-	sound {
+	sound: sound {
 		compatible = "qcom,sm8250-sndcard";
 		pinctrl-0 = <&pri_mi2s_active &pri_mi2s_ws_active>;
 		pinctrl-names = "default";
@@ -98,7 +98,7 @@
 			};
 
 			codec {
-				sound-dai = <&speaker_amp>;
+				sound-dai = <&speaker_amp>, <&earpiece_amp>;
 			};
 		};
 	};
@@ -159,10 +159,11 @@
 
 		sound-name-prefix = "Speaker";
 		#sound-dai-cells = <0>;
+		firmware-name = "aw882xx_pid_2032_acf.bin";
         };
 
-	/* Microphone */
-	mic_amp: audio-codec@35 {
+	/* Second playback amplifier */
+	earpiece_amp: audio-codec@35 {
 		compatible = "awinic,aw88263s";
 		reg = <0x35>;
 
@@ -175,8 +176,9 @@
 		awinic,audio-channel = <1>;
 		awinic,sync-flag;
 
-		sound-name-prefix = "Microphone";
+		sound-name-prefix = "Earpiece";
 		#sound-dai-cells = <0>;
+		firmware-name = "aw882xx_pid_2032_acf.bin";
         };
 };
 
@@ -287,3 +289,5 @@
 &wifi {
 	qcom,ath10k-calibration-variant = "xiaomi_sweet";
 };
+
+#include "sm7150-xiaomi-sweet-audio.dtsi"
