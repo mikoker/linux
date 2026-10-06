@@ -705,7 +705,7 @@ static int aw88261_dev_start(struct aw88261 *aw88261)
 	aw88261_dev_uls_hmute(aw_dev, false);
 
 	/* close mute */
-	if (!aw88261->mute_st) {
+	if (!aw88261->mute_st && !aw88261->diagnostic_hmute) {
 		ret = aw88261_dev_mute(aw_dev, false);
 		if (ret)
 			goto sysst_check_fail;
@@ -1071,7 +1071,7 @@ static int aw88261_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 	} else if (aw_dev->status == AW88261_DEV_PW_OFF) {
 		/* ASoC calls digital unmute after the CPU DAI has been prepared. */
 		ret = aw88261_start(aw88261);
-	} else if (was_muted) {
+	} else if (was_muted && !aw88261->diagnostic_hmute) {
 		ret = aw88261_dev_mute(aw_dev, false);
 	}
 	if (ret) {
@@ -1252,6 +1252,56 @@ static int aw88261_volume_set(struct snd_kcontrol *kcontrol,
  * The range is clamped at -90dB to prevent overflowing the 4-bit part.
  */
 static const DECLARE_TLV_DB_SCALE(volume_tlv, -9000, 25, 0);
+
+/* Keep the stream and PA powered to distinguish HMUTE from powerdown. */
+static int aw88263s_hmute_get(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
+
+	mutex_lock(&aw88261->lock);
+	ucontrol->value.integer.value[0] = aw88261->diagnostic_hmute;
+	mutex_unlock(&aw88261->lock);
+	return 0;
+}
+
+static int aw88263s_hmute_put(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
+	struct aw_device *aw_dev = aw88261->aw_pa;
+	long value = ucontrol->value.integer.value[0];
+	int ret = 0;
+
+	if (value != 0 && value != 1)
+		return -EINVAL;
+
+	mutex_lock(&aw88261->lock);
+	if (aw88261->diagnostic_hmute == value)
+		goto out;
+	if (aw_dev->status == AW88261_DEV_PW_ON && !aw88261->mute_st) {
+		/* Change only HMUTE: retain gain, feedback and power settings. */
+		if (value)
+			ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL2_REG,
+						 AW88263S_HMUTE, AW88263S_HMUTE);
+		else
+			ret = aw88263s_dev_mute(aw_dev, false);
+		if (ret)
+			goto out;
+	}
+	aw88261->diagnostic_hmute = value;
+	ret = 1;
+out:
+	mutex_unlock(&aw88261->lock);
+	return ret;
+}
+
+static const struct snd_kcontrol_new aw88263s_diagnostic_controls[] = {
+	SOC_SINGLE_BOOL_EXT("Diagnostic Hard Mute", 0,
+			    aw88263s_hmute_get, aw88263s_hmute_put),
+};
 
 static const struct snd_kcontrol_new aw88261_controls[] = {
 	SOC_SINGLE_EXT_TLV("PCM Playback Volume", AW88261_SYSCTRL2_REG,
@@ -1475,6 +1525,12 @@ static int aw88261_codec_probe(struct snd_soc_component *component)
 
 	ret = snd_soc_add_component_controls(component, aw88261_controls,
 							ARRAY_SIZE(aw88261_controls));
+	if (ret)
+		return ret;
+	if (aw88261->aw_pa->chip_id == AW88263S_CHIP_ID)
+		ret = snd_soc_add_component_controls(component,
+					aw88263s_diagnostic_controls,
+					ARRAY_SIZE(aw88263s_diagnostic_controls));
 
 	return ret;
 }

@@ -614,6 +614,7 @@ struct aw88261 {
 	unsigned int rxr_slotvld_mask;
 
 	bool phase_sync;
+	bool diagnostic_hmute;
 };
 
 #endif
