@@ -66,7 +66,6 @@
 		#sound-dai-cells = <1>;
 	};
 
-
 	swr_tx: soundwire-controller@62ed0000 {
 		compatible = "qcom,soundwire-v1.5.1";
 		reg = <0 0x62ed0000 0 0x2000>;
@@ -142,7 +141,7 @@
 
 / {
 	wcd937x: audio-codec {
-		compatible = "qcom,wcd9375-codec";
+		compatible = "qcom,wcd9375-codec", "qcom,wcd9370-codec";
 
 		/* Keep reset deasserted during runtime clock stopping. */
 		pinctrl-names = "default";
@@ -166,7 +165,7 @@
 };
 
 &lpass_tlmm {
-	/delete-property/ gpio-reserved-ranges;
+	gpio-reserved-ranges = <0 6>, <7 7>;
 
 };
 
@@ -177,7 +176,8 @@
 /* Second frontend: q6asm frontends are created from the dai@N child nodes
  * (q6asm-dai.c), and only dai@0 is described. Without its own PCM the mic
  * shares one device with the speaker and PulseAudio cannot open the
- * Speaker+Mic profile. */
+ * Speaker+Mic profile.
+ */
 &q6asmdai {
 	dai@1 {
 		reg = <1>;
