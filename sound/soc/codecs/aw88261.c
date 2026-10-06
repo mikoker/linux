@@ -1065,8 +1065,9 @@ static int aw88261_mute_stream(struct snd_soc_dai *dai, int mute, int stream)
 	was_muted = aw88261->mute_st;
 	aw88261->mute_st = !!mute;
 	if (mute) {
+		/* Finish PA powerdown before Q6AFE stops the serial clocks. */
 		if (aw_dev->status == AW88261_DEV_PW_ON)
-			ret = aw88261_dev_mute(aw_dev, true);
+			ret = aw88261_dev_stop(aw_dev);
 	} else if (aw_dev->status == AW88261_DEV_PW_OFF) {
 		/* ASoC calls digital unmute after the CPU DAI has been prepared. */
 		ret = aw88261_start(aw88261);
