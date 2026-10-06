@@ -81,11 +81,11 @@ static const char * const swr_tx_data_groups[] = { "gpio1", "gpio2", "gpio5" };
 
 static const struct lpi_pingroup sm7150_groups[] = {
 	LPI_PINGROUP(0, 0, slimbus_clk, swr_tx_clk, _, _),
-	LPI_PINGROUP(1, 2, swr_tx_data, audio_ref, _, _),
+	LPI_PINGROUP(1, 2, audio_ref, _, swr_tx_data, _),
 	LPI_PINGROUP(2, 4, slimbus_data, swr_tx_data, _, _),
 	LPI_PINGROUP(3, 8, slimbus_data, swr_rx_clk, _, _),
 	LPI_PINGROUP(4, 10, slimbus_data, swr_rx_data, prim_mclk_a, _),
-	LPI_PINGROUP(5, 6, qua_mi2s_sclk, _, swr_rx_data, swr_tx_data),
+	LPI_PINGROUP(5, 6, qua_mi2s_sclk, swr_rx_data, _, swr_tx_data),
 	LPI_PINGROUP(6, LPI_NO_SLEW, qua_mi2s_ws, cdc_pdm_rx, _, _),
 	LPI_PINGROUP(7, LPI_NO_SLEW, qua_mi2s_data, _, _, _),
 	LPI_PINGROUP(8, LPI_NO_SLEW, qua_mi2s_data, dmic1_clk, _, _),
