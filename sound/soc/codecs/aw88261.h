@@ -615,6 +615,9 @@ struct aw88261 {
 
 	bool phase_sync;
 	bool diagnostic_hmute;
+	bool diagnostic_low_gain;
+	bool profile_spk_gain_valid;
+	unsigned int profile_spk_gain;
 };
 
 #endif
