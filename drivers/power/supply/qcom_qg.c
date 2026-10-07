@@ -131,7 +131,11 @@ static int qcom_qg_get_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
-		val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
+		ret = power_supply_get_property_from_supplier(psy, psp, val);
+		if (ret == -ENODEV)
+			val->intval = POWER_SUPPLY_STATUS_UNKNOWN;
+		else if (ret)
+			return ret;
 		break;
 	case POWER_SUPPLY_PROP_TECHNOLOGY:
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
@@ -172,6 +176,8 @@ static int qcom_qg_get_property(struct power_supply *psy,
 			return ret;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		if (chip->batt_info->charge_full_design_uah <= 0)
+			return -ENODATA;
 		val->intval = chip->batt_info->charge_full_design_uah;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
@@ -206,6 +212,7 @@ static struct power_supply_desc batt_psy_desc = {
 	.properties = qcom_qg_props,
 	.num_properties = ARRAY_SIZE(qcom_qg_props),
 	.get_property = qcom_qg_get_property,
+	.external_power_changed = power_supply_changed,
 };
 
 static int qcom_qg_probe(struct platform_device *pdev)
