@@ -15,6 +15,9 @@
 #include <linux/regmap.h>
 
 /* BATT offsets */
+#define QG_SUBTYPE_REG			0x05
+#define QG_ADC_IBAT_5A			0x03
+#define QG_ADC_IBAT_10A			0x04
 #define QG_STATUS2_REG			0x09
 #define QG_GOOD_OCV_BIT			BIT(1)
 #define QG_S3_GOOD_OCV_V_DATA0_REG		0x74 /* 2-byte 0x74-0x75 */
@@ -30,6 +33,7 @@ struct qcom_qg_chip {
 	struct device *dev;
 	struct regmap *regmap;
 	unsigned int base;
+	unsigned int current_factor;
 
 	struct iio_channel *batt_therm_chan;
 
@@ -52,7 +56,7 @@ static int qcom_qg_get_current(struct qcom_qg_chip *chip, u8 offset, int *val)
 	}
 
 	temp = (s16)(readval[1] << 8 | readval[0]);
-	*val = div_s64((s64)temp * 152588, 1000);
+	*val = div_s64((s64)temp * chip->current_factor, 1000);
 
 	/*
 	 * PSY API expects charging batteries to report a positive current, which is inverted
@@ -241,6 +245,7 @@ static int qcom_qg_probe(struct platform_device *pdev)
 {
 	struct qcom_qg_chip *chip;
 	struct power_supply_config psy_cfg = {};
+	unsigned int subtype;
 	int ret;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
@@ -260,6 +265,21 @@ static int qcom_qg_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return dev_err_probe(chip->dev, ret,
 				     "Couldn't read base address\n");
+
+	ret = regmap_read(chip->regmap, chip->base + QG_SUBTYPE_REG, &subtype);
+	if (ret)
+		return dev_err_probe(chip->dev, ret, "Couldn't read QGauge subtype\n");
+	switch (subtype) {
+	case QG_ADC_IBAT_5A:
+		chip->current_factor = 152588;
+		break;
+	case QG_ADC_IBAT_10A:
+		chip->current_factor = 305176;
+		break;
+	default:
+		return dev_err_probe(chip->dev, -ENODEV,
+				     "Unsupported QGauge subtype %#x\n", subtype);
+	}
 
 	/* ADC for thermal channel */
 	chip->batt_therm_chan = devm_iio_channel_get(chip->dev, "batt-therm");
