@@ -451,7 +451,7 @@ static int qcom_qg_get_property(struct power_supply *psy,
 {
 	struct qcom_qg_chip *chip = power_supply_get_drvdata(psy);
 	u8 learned_capacity[2];
-	int ret;
+	int ret, percent;
 
 	/* Pair with probe's release: publish fully initialized estimation state. */
 	if (!smp_load_acquire(&chip->ready))
@@ -539,8 +539,21 @@ static int qcom_qg_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
 		mutex_lock(&chip->lock);
-		val->intval = chip->estimator_enabled && chip->anchored && !chip->data_gap ?
-			POWER_SUPPLY_CAPACITY_LEVEL_NORMAL : POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN;
+		val->intval = POWER_SUPPLY_CAPACITY_LEVEL_UNKNOWN;
+		if (chip->estimator_enabled && chip->anchored && !chip->data_gap) {
+			percent = div64_s64(chip->charge_uams * 100 + chip->full_uams / 2,
+					    chip->full_uams);
+			if (percent <= 1)
+				val->intval = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
+			else if (percent <= 10)
+				val->intval = POWER_SUPPLY_CAPACITY_LEVEL_LOW;
+			else if (percent == 100)
+				val->intval = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
+			else if (percent >= 90)
+				val->intval = POWER_SUPPLY_CAPACITY_LEVEL_HIGH;
+			else
+				val->intval = POWER_SUPPLY_CAPACITY_LEVEL_NORMAL;
+		}
 		mutex_unlock(&chip->lock);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
