@@ -109,7 +109,7 @@ enum smb_generation {
 #define AUTO_SRC_DETECT_BIT				BIT(3)
 #define HVDCP_EN_BIT					BIT(2)
 
-#define USBIN_LOAD_CFG					0x65
+#define USBIN_LOAD_CFG					0x365
 #define ICL_OVERRIDE_AFTER_APSD_BIT			BIT(4)
 
 #define USBIN_ICL_OPTIONS				0x366
@@ -493,6 +493,7 @@ static inline int smb_get_current_now(struct smb_chip *chip,
 static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 {
 	unsigned char val_raw;
+	int rc;
 
 	if (val > chip->current_limit_max_ua) {
 		dev_err(chip->dev,
@@ -501,8 +502,26 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 	}
 	val_raw = val / chip->current_step_size_ua;
 
-	return regmap_write(chip->regmap, chip->base + USBIN_CURRENT_LIMIT_CFG,
-			    val_raw);
+	rc = regmap_write(chip->regmap, chip->base + USBIN_CURRENT_LIMIT_CFG,
+			  val_raw);
+	if (rc || chip->gen != SMB5)
+		return rc;
+
+	/* Select the programmed limit after APSD, preserving SDP fallback. */
+	rc = regmap_update_bits(chip->regmap, chip->base + USBIN_ICL_OPTIONS,
+				USBIN_MODE_CHG_BIT, USBIN_MODE_CHG_BIT);
+	if (rc)
+		return rc;
+
+	rc = regmap_update_bits(chip->regmap, chip->base + CMD_ICL_OVERRIDE,
+				ICL_OVERRIDE_BIT, 0);
+	if (rc)
+		return rc;
+
+	return regmap_update_bits(chip->regmap, chip->base + USBIN_LOAD_CFG,
+				  ICL_OVERRIDE_AFTER_APSD_BIT,
+				  val > SDP_CURRENT_UA ?
+				  ICL_OVERRIDE_AFTER_APSD_BIT : 0);
 }
 
 static void smb_status_change_work(struct work_struct *work)
@@ -514,7 +533,11 @@ static void smb_status_change_work(struct work_struct *work)
 
 	chip = container_of(work, struct smb_chip, status_change_work.work);
 
-	smb_get_prop_usb_online(chip, &usb_online);
+	rc = smb_get_prop_usb_online(chip, &usb_online);
+	if (rc < 0) {
+		dev_err(chip->dev, "Couldn't read USB online status: %d\n", rc);
+		return;
+	}
 	if (!usb_online)
 		return;
 
@@ -553,7 +576,11 @@ static void smb_status_change_work(struct work_struct *work)
 		break;
 	}
 
-	smb_set_current_limit(chip, current_ua);
+	rc = smb_set_current_limit(chip, current_ua);
+	if (rc < 0) {
+		dev_err(chip->dev, "Couldn't set USB current limit: %d\n", rc);
+		return;
+	}
 	power_supply_changed(chip->chg_psy);
 }
 
