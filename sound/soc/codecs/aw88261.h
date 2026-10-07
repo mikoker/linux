@@ -615,7 +615,7 @@ struct aw88261 {
 
 	bool phase_sync;
 	bool diagnostic_hmute;
-	bool diagnostic_low_gain;
+	unsigned int speaker_gain; /* AW88263S gain code, default 0 (7 dB). */
 	bool profile_spk_gain_valid;
 	unsigned int profile_spk_gain;
 };

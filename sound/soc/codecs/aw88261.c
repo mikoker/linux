@@ -679,11 +679,11 @@ static int aw88261_dev_start(struct aw88261 *aw88261)
 	}
 
 	if (aw_dev->chip_id == AW88263S_CHIP_ID && aw88261->profile_spk_gain_valid) {
-		/* Gain code zero is the minimum (7 dB), never above the profile. */
+		/* Default to 7 dB; a new profile may only lower the selected gain. */
 		ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
 					 AW88263S_SPK_GAIN_MASK,
-					 aw88261->diagnostic_low_gain ? 0 :
-					 aw88261->profile_spk_gain);
+					 min(aw88261->speaker_gain << 12,
+					     aw88261->profile_spk_gain));
 		if (ret)
 			goto sysst_check_fail;
 	}
@@ -1311,28 +1311,34 @@ out:
 	return ret;
 }
 
-static int aw88263s_low_gain_get(struct snd_kcontrol *kcontrol,
+static const char * const aw88263s_gain_texts[] = {
+	"7 dB", "8 dB", "10 dB", "14 dB", "16 dB", "20 dB",
+};
+
+static SOC_ENUM_SINGLE_EXT_DECL(aw88263s_gain_enum, aw88263s_gain_texts);
+
+static int aw88263s_gain_get(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
 
 	mutex_lock(&aw88261->lock);
-	ucontrol->value.integer.value[0] = aw88261->diagnostic_low_gain;
+	ucontrol->value.enumerated.item[0] = aw88261->speaker_gain;
 	mutex_unlock(&aw88261->lock);
 	return 0;
 }
 
-static int aw88263s_low_gain_put(struct snd_kcontrol *kcontrol,
+static int aw88263s_gain_put(struct snd_kcontrol *kcontrol,
 			       struct snd_ctl_elem_value *ucontrol)
 {
 	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
 	struct aw_device *aw_dev = aw88261->aw_pa;
-	long value = ucontrol->value.integer.value[0];
+	unsigned int value = ucontrol->value.enumerated.item[0];
 	int ret = 0;
 
-	if (value != 0 && value != 1)
+	if (value >= ARRAY_SIZE(aw88263s_gain_texts))
 		return -EINVAL;
 
 	mutex_lock(&aw88261->lock);
@@ -1340,16 +1346,20 @@ static int aw88263s_low_gain_put(struct snd_kcontrol *kcontrol,
 		ret = -ENODATA;
 		goto out;
 	}
-	if (aw88261->diagnostic_low_gain == value)
+	if ((value << 12) > aw88261->profile_spk_gain) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (aw88261->speaker_gain == value)
 		goto out;
 	if (aw_dev->status == AW88261_DEV_PW_ON) {
 		ret = regmap_update_bits(aw_dev->regmap, AW88261_SYSCTRL_REG,
 					 AW88263S_SPK_GAIN_MASK,
-					 value ? 0 : aw88261->profile_spk_gain);
+					 value << 12);
 		if (ret)
 			goto out;
 	}
-	aw88261->diagnostic_low_gain = value;
+	aw88261->speaker_gain = value;
 	ret = 1;
 out:
 	mutex_unlock(&aw88261->lock);
@@ -1359,8 +1369,8 @@ out:
 static const struct snd_kcontrol_new aw88263s_diagnostic_controls[] = {
 	SOC_SINGLE_BOOL_EXT("Diagnostic Hard Mute", 0,
 			    aw88263s_hmute_get, aw88263s_hmute_put),
-	SOC_SINGLE_BOOL_EXT("Diagnostic Low Analog Gain", 0,
-			    aw88263s_low_gain_get, aw88263s_low_gain_put),
+	SOC_ENUM_EXT("Analog Gain", aw88263s_gain_enum,
+			    aw88263s_gain_get, aw88263s_gain_put),
 };
 
 static const struct snd_kcontrol_new aw88261_controls[] = {
