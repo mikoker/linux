@@ -15,13 +15,15 @@
 #include <linux/regmap.h>
 
 /* BATT offsets */
+#define QG_STATUS2_REG			0x09
+#define QG_GOOD_OCV_BIT			BIT(1)
+#define QG_S3_GOOD_OCV_V_DATA0_REG		0x74 /* 2-byte 0x74-0x75 */
 #define QG_S2_NORMAL_AVG_V_DATA0_REG	0x80 /* 2-byte 0x80-0x81 */
 #define QG_S2_NORMAL_AVG_I_DATA0_REG	0x82 /* 2-byte 0x82-0x83 */
 #define QG_LAST_ADC_V_DATA0_REG		0xc0 /* 2-byte 0xc0-0xc1 */
 #define QG_LAST_ADC_I_DATA0_REG		0xc2 /* 2-byte 0xc2-0xc3 */
 
 /* SRAM offsets */
-#define QG_SDAM_OCV_OFFSET		0x4c /* 4-byte 0x4c-0x4f */
 #define QG_SDAM_LEARNED_CAPACITY_OFFSET	0x68 /* 2-byte 0x68-0x69 */
 
 struct qcom_qg_chip {
@@ -78,6 +80,21 @@ static int qcom_qg_get_voltage(struct qcom_qg_chip *chip, u8 offset, int *val)
 	return 0;
 }
 
+static int qcom_qg_get_ocv(struct qcom_qg_chip *chip, int *val)
+{
+	unsigned int status;
+	int ret;
+
+	/* SDAM may contain an OCV left by a previous Android boot. */
+	ret = regmap_read(chip->regmap, chip->base + QG_STATUS2_REG, &status);
+	if (ret)
+		return ret;
+	if (!(status & QG_GOOD_OCV_BIT))
+		return -ENODATA;
+
+	return qcom_qg_get_voltage(chip, QG_S3_GOOD_OCV_V_DATA0_REG, val);
+}
+
 /*
  * Yes, this function simply calculates the capacity based on
  * the current voltage. This will be rewritten in the future.
@@ -127,6 +144,7 @@ static int qcom_qg_get_property(struct power_supply *psy,
 				union power_supply_propval *val)
 {
 	struct qcom_qg_chip *chip = power_supply_get_drvdata(psy);
+	u8 learned_capacity[2];
 	int ret;
 
 	switch (psp) {
@@ -159,8 +177,8 @@ static int qcom_qg_get_property(struct power_supply *psy,
 			return ret;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_OCV:
-		ret = nvmem_device_read(chip->sdam, QG_SDAM_OCV_OFFSET, 4, &val->intval);
-		if (ret < 0)
+		ret = qcom_qg_get_ocv(chip, &val->intval);
+		if (ret)
 			return ret;
 		break;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
@@ -182,10 +200,14 @@ static int qcom_qg_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		ret = nvmem_device_read(chip->sdam,
-				QG_SDAM_LEARNED_CAPACITY_OFFSET, 2, &val->intval);
+				QG_SDAM_LEARNED_CAPACITY_OFFSET,
+				sizeof(learned_capacity), learned_capacity);
 		if (ret < 0)
 			return ret;
-		val->intval *= 1000; /* mAh to uAh */
+		if (ret != sizeof(learned_capacity))
+			return -EIO;
+		val->intval = (learned_capacity[0] |
+			      learned_capacity[1] << 8) * 1000; /* mAh to uAh */
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		ret = qcom_qg_get_capacity(chip, &val->intval);
