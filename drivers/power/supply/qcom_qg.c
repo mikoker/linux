@@ -14,6 +14,7 @@
 #include <linux/of.h>
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
+#include <linux/pm.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/unaligned.h>
@@ -259,10 +260,8 @@ static void qcom_qg_anchor(struct qcom_qg_chip *chip, int percent)
 	chip->data_gap = false;
 }
 
-static void qcom_qg_capture_work(struct work_struct *work)
+static unsigned long qcom_qg_update(struct qcom_qg_chip *chip)
 {
-	struct qcom_qg_chip *chip = container_of(to_delayed_work(work),
-						struct qcom_qg_chip, capture_work);
 	struct qcom_qg_snapshot snapshot = {};
 	union power_supply_propval status;
 	ktime_t now = ktime_get_boottime();
@@ -331,10 +330,42 @@ static void qcom_qg_capture_work(struct work_struct *work)
 	    abs(batt_current) < 100000)
 		qcom_qg_anchor(chip, 100);
 	mutex_unlock(&chip->lock);
+	return delay;
+}
+
+static void qcom_qg_capture_work(struct work_struct *work)
+{
+	struct qcom_qg_chip *chip = container_of(to_delayed_work(work),
+						struct qcom_qg_chip, capture_work);
+	unsigned long delay = qcom_qg_update(chip);
 
 	power_supply_changed(chip->batt_psy);
 	queue_delayed_work(system_freezable_wq, &chip->capture_work, delay);
 }
+
+static int qcom_qg_suspend(struct device *dev)
+{
+	struct qcom_qg_chip *chip = dev_get_drvdata(dev);
+
+	if (chip->estimator_enabled) {
+		cancel_delayed_work_sync(&chip->capture_work);
+		/* Harvest awake samples so the sleep epoch gets the whole FIFO. */
+		qcom_qg_update(chip);
+		/* Do not notify here: power_supply_changed holds a wakeup source. */
+	}
+	return 0;
+}
+
+static int qcom_qg_resume(struct device *dev)
+{
+	struct qcom_qg_chip *chip = dev_get_drvdata(dev);
+
+	if (chip->estimator_enabled)
+		mod_delayed_work(system_freezable_wq, &chip->capture_work, 0);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(qcom_qg_pm_ops, qcom_qg_suspend, qcom_qg_resume);
 
 static ssize_t soc_state_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
@@ -656,6 +687,7 @@ static struct platform_driver qcom_qg_driver = {
 		.name = "qcom,qcom_qg",
 		.of_match_table = qcom_qg_of_match,
 		.dev_groups = qcom_qg_groups,
+		.pm = pm_sleep_ptr(&qcom_qg_pm_ops),
 	},
 	.probe = qcom_qg_probe,
 };
