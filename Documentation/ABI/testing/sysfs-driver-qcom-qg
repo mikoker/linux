@@ -1,0 +1,11 @@
+What:           /sys/bus/platform/devices/*/soc_state
+Date:           October 2026
+Description:
+                Read-only QGauge estimator diagnostics. Space-separated key=value
+                fields describe whether the FIFO estimator is enabled, whether a
+                hardware OCV/full-charge anchor has been obtained, and whether
+                an unresolved measurement gap exists. Capture counters and
+                sampled/elapsed durations expose measurement coverage. Charge
+                values are microamp-hours; OCV is microvolts; time is milliseconds.
+                A boot-time terminal-voltage seed is provisional. Neither this
+                attribute nor CHARGE_NOW establishes measured battery health.
