@@ -150,6 +150,8 @@ enum smb_generation {
 
 /* 0x5xx region is PM8150b only Type-C registers */
 #define SMB5_TYPE_C_SRC_STATUS_REG			0x508
+#define SMB5_TYPE_C_MISC_STATUS_REG			0x50B
+#define SMB5_CC_ATTACHED_BIT				BIT(0)
 #define SMB5_DETECTED_SNK_TYPE_MASK			GENMASK(4, 0)
 #define SMB5_SRC_DEBUG_ACCESS_BIT			BIT(4)
 #define SMB5_SRC_RD_OPEN_BIT				BIT(3)
@@ -493,6 +495,8 @@ static inline int smb_get_current_now(struct smb_chip *chip,
 static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 {
 	unsigned char val_raw;
+	unsigned int typec_status;
+	unsigned int icl_override = 0;
 	int rc;
 
 	if (val > chip->current_limit_max_ua) {
@@ -513,8 +517,19 @@ static int smb_set_current_limit(struct smb_chip *chip, unsigned int val)
 	if (rc)
 		return rc;
 
+	/* Legacy inputs without a CC attachment need the explicit ICL override. */
+	if (val > SDP_CURRENT_UA) {
+		rc = regmap_read(chip->regmap,
+				 chip->base + SMB5_TYPE_C_MISC_STATUS_REG,
+				 &typec_status);
+		if (rc)
+			return rc;
+		if (!(typec_status & SMB5_CC_ATTACHED_BIT))
+			icl_override = ICL_OVERRIDE_BIT;
+	}
+
 	rc = regmap_update_bits(chip->regmap, chip->base + CMD_ICL_OVERRIDE,
-				ICL_OVERRIDE_BIT, 0);
+				ICL_OVERRIDE_BIT, icl_override);
 	if (rc)
 		return rc;
 
