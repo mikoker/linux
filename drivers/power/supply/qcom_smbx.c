@@ -376,7 +376,7 @@ static int smbx_ov_status(struct smb_chip *chip)
 	if (rc)
 		return rc;
 
-	return !!(reg & mask);
+	return !!(val & mask);
 }
 
 static int smb_get_prop_status(struct smb_chip *chip, int *val)
