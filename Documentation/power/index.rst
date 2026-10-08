@@ -17,6 +17,7 @@ Power Management
     pci
     pm_qos_interface
     power_supply_class
+    qcom_qg
     runtime_pm
     s2ram
     shutdown-debugging

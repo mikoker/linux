@@ -1,0 +1,25 @@
+What:           /sys/class/power_supply/qcom_qg/device/soc_state
+Date:           October 2026
+Contact:        Linux power supply mailing list <linux-pm@vger.kernel.org>
+Description:
+                Read-only diagnostic state of FIFO-based QGauge estimation.
+                Boards without FIFO estimation report enabled=0. Otherwise
+                a single line contains key=value fields:
+
+                enabled: FIFO estimation is active.
+                anchored: an OCV/full anchor has been obtained or restored.
+                gap: active uncertainty from missing charge coverage.
+                restored: a recent private SDAM record seeded this boot.
+                captures/gaps: accepted capture and detected gap counters.
+                sampled_ms: accumulated accepted sample duration.
+                interval_ms: last ADC sample interval.
+                fifo/accum: last completed FIFO and partial sample counts.
+                charge_uah: estimated charge in microamp-hours.
+                ocv_uv: last accepted hardware OCV, or zero.
+                elapsed_ms/duration_ms: last capture wall/sample duration.
+                delta_uah: signed charge delta of the last accepted capture.
+
+                Counters start at probe. A historical gap may be recovered
+                by an OCV/full anchor, clearing gap without decrementing gaps.
+                sampled_ms is not total uptime or proof of sleep coverage.
+                These values do not establish measured battery health.
