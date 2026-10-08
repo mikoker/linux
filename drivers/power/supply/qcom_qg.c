@@ -19,6 +19,7 @@
 #include <linux/pm_wakeirq.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
+#include <linux/rtc.h>
 #include <linux/unaligned.h>
 
 /* BATT offsets */
@@ -51,6 +52,14 @@
 #define QG_CAPTURE_PERIOD_MS		300000
 
 /* SRAM offsets */
+#define QG_SDAM_VALID_OFFSET		0x46
+#define QG_SDAM_SOC_OFFSET		0x47
+#define QG_SDAM_TEMP_OFFSET		0x48
+#define QG_SDAM_OCV_OFFSET		0x4c
+#define QG_SDAM_IBAT_OFFSET		0x50
+#define QG_SDAM_TIME_OFFSET		0x54
+#define QG_SDAM_OWN_VALID		0x51
+#define QG_RESTORE_MAX_AGE_SEC		120
 #define QG_SDAM_LEARNED_CAPACITY_OFFSET	0x68 /* 2-byte 0x68-0x69 */
 
 struct qcom_qg_chip {
@@ -72,6 +81,9 @@ struct qcom_qg_chip {
 	bool estimator_enabled;
 	bool anchored;
 	bool data_gap;
+	bool persist_soc;
+	bool restored;
+	bool fifo_irq;
 	s64 charge_uams;
 	s64 full_uams;
 	ktime_t last_capture;
@@ -275,6 +287,113 @@ static void qcom_qg_anchor(struct qcom_qg_chip *chip, int percent)
 	chip->data_gap = false;
 }
 
+/* Use the PMIC clock, not wall time: the RTC need not contain a calendar date. */
+static int qcom_qg_rtc_seconds(u32 *seconds)
+{
+	struct rtc_device *rtc;
+	struct rtc_time tm;
+	time64_t now;
+	int ret;
+
+	if (!IS_REACHABLE(CONFIG_RTC_CLASS))
+		return -ENODEV;
+	rtc = rtc_class_open("rtc0");
+	if (!rtc)
+		return -ENODEV;
+	ret = rtc_read_time(rtc, &tm);
+	rtc_class_close(rtc);
+	if (ret)
+		return ret;
+	now = rtc_tm_to_time64(&tm);
+	if (now < 0 || now > U32_MAX)
+		return -ERANGE;
+	*seconds = now;
+	return 0;
+}
+
+static int qcom_qg_sdam_write(struct qcom_qg_chip *chip, unsigned int offset,
+			     void *data, size_t length)
+{
+	int ret = nvmem_device_write(chip->sdam, offset, length, data);
+
+	return ret < 0 ? ret : ret == length ? 0 : -EIO;
+}
+
+static int qcom_qg_save_soc(struct qcom_qg_chip *chip)
+{
+	u8 valid = 0, soc, data[4];
+	u32 seconds;
+	int ret, temp, voltage, batt_current;
+
+	if (!chip->persist_soc)
+		return 0;
+	/* Invalidate first; an interrupted or uncertain record is never restored. */
+	ret = qcom_qg_sdam_write(chip, QG_SDAM_VALID_OFFSET, &valid, 1);
+	if (ret || !chip->anchored || chip->data_gap)
+		return ret;
+	ret = qcom_qg_rtc_seconds(&seconds);
+	if (ret)
+		return ret;
+	ret = iio_read_channel_processed(chip->batt_therm_chan, &temp);
+	if (ret < 0)
+		return ret;
+	ret = qcom_qg_get_voltage(chip, QG_S2_NORMAL_AVG_V_DATA0_REG, &voltage);
+	if (ret)
+		return ret;
+	ret = qcom_qg_get_current(chip, QG_LAST_ADC_I_DATA0_REG, &batt_current);
+	if (ret)
+		return ret;
+	soc = div64_s64(chip->charge_uams * 100 + chip->full_uams / 2, chip->full_uams);
+	ret = qcom_qg_sdam_write(chip, QG_SDAM_SOC_OFFSET, &soc, 1);
+	if (ret)
+		return ret;
+	put_unaligned_le16((s16)(temp / 100), data);
+	ret = qcom_qg_sdam_write(chip, QG_SDAM_TEMP_OFFSET, data, 2);
+	if (ret)
+		return ret;
+	put_unaligned_le32(voltage, data);
+	ret = qcom_qg_sdam_write(chip, QG_SDAM_OCV_OFFSET, data, 4);
+	if (ret)
+		return ret;
+	/* Android's IBAT field uses positive discharge current. */
+	put_unaligned_le32(-batt_current, data);
+	ret = qcom_qg_sdam_write(chip, QG_SDAM_IBAT_OFFSET, data, 4);
+	if (ret)
+		return ret;
+	put_unaligned_le32(seconds, data);
+	ret = qcom_qg_sdam_write(chip, QG_SDAM_TIME_OFFSET, data, 4);
+	if (ret)
+		return ret;
+	valid = QG_SDAM_OWN_VALID;
+	return qcom_qg_sdam_write(chip, QG_SDAM_VALID_OFFSET, &valid, 1);
+}
+
+static void qcom_qg_restore_soc(struct qcom_qg_chip *chip)
+{
+	u8 data[18];
+	u32 seconds, saved;
+	int ret, temp;
+
+	if (!chip->persist_soc)
+		return;
+	ret = nvmem_device_read(chip->sdam, QG_SDAM_VALID_OFFSET, sizeof(data), data);
+	if (ret != sizeof(data) || data[0] != QG_SDAM_OWN_VALID || data[1] > 100)
+		return;
+	ret = qcom_qg_rtc_seconds(&seconds);
+	if (ret)
+		return;
+	saved = get_unaligned_le32(data + QG_SDAM_TIME_OFFSET - QG_SDAM_VALID_OFFSET);
+	if (saved > seconds || seconds - saved > QG_RESTORE_MAX_AGE_SEC)
+		return;
+	ret = iio_read_channel_processed(chip->batt_therm_chan, &temp);
+	if (ret < 0 || abs(temp / 100 - (s16)get_unaligned_le16(data + 2)) > 50)
+		return;
+	qcom_qg_anchor(chip, data[1]);
+	/* Charge while powered off was not sampled: wait for the next anchor. */
+	chip->data_gap = true;
+	chip->restored = true;
+}
+
 static unsigned long qcom_qg_update(struct qcom_qg_chip *chip)
 {
 	struct qcom_qg_snapshot snapshot = {};
@@ -282,7 +401,8 @@ static unsigned long qcom_qg_update(struct qcom_qg_chip *chip)
 	ktime_t now = ktime_get_boottime();
 	s64 elapsed, target, correction;
 	int ret, ocv_ret, voltage, batt_current, percent;
-	unsigned long delay = msecs_to_jiffies(QG_CAPTURE_PERIOD_MS);
+	unsigned long delay = msecs_to_jiffies(chip->fifo_irq ?
+					      3 * QG_CAPTURE_PERIOD_MS : QG_CAPTURE_PERIOD_MS);
 
 	mutex_lock(&chip->lock);
 	elapsed = ktime_ms_delta(now, chip->last_capture);
@@ -344,6 +464,9 @@ static unsigned long qcom_qg_update(struct qcom_qg_chip *chip)
 	    voltage >= chip->batt_info->voltage_max_design_uv - 50000 &&
 	    abs(batt_current) < 100000)
 		qcom_qg_anchor(chip, 100);
+	ret = qcom_qg_save_soc(chip);
+	if (ret)
+		dev_warn_ratelimited(chip->dev, "Couldn't save SOC: %d\n", ret);
 	mutex_unlock(&chip->lock);
 	return delay;
 }
@@ -433,8 +556,8 @@ static ssize_t soc_state_show(struct device *dev,
 		return sysfs_emit(buf, "enabled=0\n");
 	mutex_lock(&chip->lock);
 	ret = sysfs_emit(buf,
-			"enabled=1 anchored=%u gap=%u captures=%llu gaps=%llu sampled_ms=%llu interval_ms=%u fifo=%u accum=%u charge_uah=%lld ocv_uv=%d elapsed_ms=%lld duration_ms=%u delta_uah=%lld\n",
-			chip->anchored, chip->data_gap, chip->captures, chip->gaps,
+			"enabled=1 anchored=%u gap=%u restored=%u captures=%llu gaps=%llu sampled_ms=%llu interval_ms=%u fifo=%u accum=%u charge_uah=%lld ocv_uv=%d elapsed_ms=%lld duration_ms=%u delta_uah=%lld\n",
+			chip->anchored, chip->data_gap, chip->restored, chip->captures, chip->gaps,
 			chip->captured_ms, chip->sample_interval_ms, chip->fifo_count,
 			chip->accum_count, div_s64(chip->charge_uams, 3600000), chip->ocv_uv,
 			chip->last_elapsed_ms, chip->last_duration_ms,
@@ -721,7 +844,9 @@ static int qcom_qg_probe(struct platform_device *pdev)
 		if (percent < 0)
 			return percent;
 		chip->full_uams = (s64)chip->batt_info->charge_full_design_uah * 3600000;
+		chip->persist_soc = device_property_read_bool(chip->dev, "qcom,persist-soc");
 		chip->charge_uams = div_s64(chip->full_uams * percent, 100);
+		qcom_qg_restore_soc(chip);
 		/* Discard pre-probe data and any sticky event from a previous OS. */
 		ret = regmap_write(chip->regmap, chip->base + QG_STATUS2_REG, 0);
 		if (ret)
@@ -750,19 +875,31 @@ static int qcom_qg_probe(struct platform_device *pdev)
 			ret = devm_device_init_wakeup(chip->dev);
 			if (ret)
 				return ret;
+			chip->fifo_irq = true;
 			ret = devm_pm_set_wake_irq(chip->dev, irq);
 			if (ret)
 				return ret;
 		}
 		chip->estimator_enabled = true;
 		queue_delayed_work(system_freezable_wq, &chip->capture_work,
-				   msecs_to_jiffies(QG_CAPTURE_PERIOD_MS));
+				   msecs_to_jiffies(chip->fifo_irq ?
+					    3 * QG_CAPTURE_PERIOD_MS : QG_CAPTURE_PERIOD_MS));
 	}
 	/* Property readers can run as soon as the power supply is registered. */
 	smp_store_release(&chip->ready, true);
 	power_supply_changed(chip->batt_psy);
 
 	return 0;
+}
+
+static void qcom_qg_shutdown(struct platform_device *pdev)
+{
+	struct qcom_qg_chip *chip = platform_get_drvdata(pdev);
+
+	if (chip->estimator_enabled) {
+		cancel_delayed_work_sync(&chip->capture_work);
+		qcom_qg_update(chip);
+	}
 }
 
 static const struct of_device_id qcom_qg_of_match[] = {
@@ -779,6 +916,7 @@ static struct platform_driver qcom_qg_driver = {
 		.pm = pm_sleep_ptr(&qcom_qg_pm_ops),
 	},
 	.probe = qcom_qg_probe,
+	.shutdown = qcom_qg_shutdown,
 };
 
 module_platform_driver(qcom_qg_driver);
