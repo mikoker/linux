@@ -84,6 +84,8 @@ struct qcom_qg_chip {
 	bool persist_soc;
 	bool restored;
 	bool fifo_irq;
+	bool fifo_done;
+	u32 full_fifo_ms;
 	s64 charge_uams;
 	s64 full_uams;
 	ktime_t last_capture;
@@ -184,10 +186,15 @@ static int qcom_qg_capture(struct qcom_qg_chip *chip,
 	s64 raw_i = 0;
 	int ret, release_ret;
 
-	/* A completed batch uses the configured length, not the next RT count. */
-	ret = regmap_read(chip->regmap, chip->base + QG_INT_RT_STS_REG, &status);
-	if (ret)
-		return ret;
+	/* The IRQ status can already be clear by the time deferred work runs. */
+	if (chip->fifo_done) {
+		status = QG_FIFO_DONE_BIT;
+		chip->fifo_done = false;
+	} else {
+		ret = regmap_read(chip->regmap, chip->base + QG_INT_RT_STS_REG, &status);
+		if (ret)
+			return ret;
+	}
 
 	ret = regmap_update_bits(chip->regmap, chip->base + QG_DATA_CTL1_REG,
 				 QG_MASTER_HOLD_BIT, 0);
@@ -423,6 +430,7 @@ static unsigned long qcom_qg_update(struct qcom_qg_chip *chip)
 			chip->data_gap = true;
 			chip->gaps++;
 		}
+		chip->full_fifo_ms = snapshot.full_fifo_ms;
 		chip->last_elapsed_ms = elapsed;
 		chip->last_duration_ms = snapshot.duration_ms;
 		chip->last_delta_uams = snapshot.charge_uams;
@@ -485,6 +493,15 @@ static irqreturn_t qcom_qg_fifo_done(int irq, void *data)
 {
 	struct qcom_qg_chip *chip = data;
 
+	mutex_lock(&chip->lock);
+	/* A late IRQ from a batch already harvested must not replay that batch. */
+	if (ktime_ms_delta(ktime_get_boottime(), chip->last_capture) <
+	    chip->full_fifo_ms * 9 / 10) {
+		mutex_unlock(&chip->lock);
+		return IRQ_HANDLED;
+	}
+	chip->fifo_done = true;
+	mutex_unlock(&chip->lock);
 	/* Run after thaw, with the same serialization as resume and polling. */
 	mod_delayed_work(system_freezable_wq, &chip->capture_work, 0);
 	return IRQ_HANDLED;
@@ -855,6 +872,7 @@ static int qcom_qg_probe(struct platform_device *pdev)
 		if (ret)
 			return dev_err_probe(chip->dev, ret, "Couldn't start QG capture epoch\n");
 		chip->last_capture = ktime_get_boottime();
+		chip->full_fifo_ms = snapshot.full_fifo_ms;
 		ret = devm_delayed_work_autocancel(chip->dev, &chip->capture_work,
 						 qcom_qg_capture_work);
 		if (ret)
