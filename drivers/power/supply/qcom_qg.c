@@ -6,6 +6,7 @@
 #include <linux/devm-helpers.h>
 #include <linux/iio/consumer.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
@@ -15,6 +16,7 @@
 #include <linux/of_address.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/pm_wakeirq.h>
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/unaligned.h>
@@ -30,6 +32,12 @@
 #define QG_S2_NORMAL_AVG_I_DATA0_REG	0x82 /* 2-byte 0x82-0x83 */
 #define QG_LAST_ADC_V_DATA0_REG		0xc0 /* 2-byte 0xc0-0xc1 */
 #define QG_LAST_ADC_I_DATA0_REG		0xc2 /* 2-byte 0xc2-0xc3 */
+
+#define QG_INT_RT_STS_REG		0x10
+#define QG_FIFO_DONE_BIT		BIT(3)
+#define QG_S3_IBAT_CTL_REG		0x5d
+#define QG_S3_ENTRY_IBAT_REG		0x5e
+#define QG_S3_EXIT_IBAT_REG		0x5f
 
 #define QG_STATUS3_REG			0x0a
 #define QG_DATA_CTL1_REG			0x41
@@ -159,10 +167,15 @@ static int qcom_qg_capture(struct qcom_qg_chip *chip,
 {
 	u8 config[2], v_fifo[QG_MAX_FIFO * 2], i_fifo[QG_MAX_FIFO * 2];
 	u8 accum[7];
-	unsigned int count, i;
+	unsigned int count, i, status;
 	u32 samples, length, accum_count, raw_v;
 	s64 raw_i = 0;
 	int ret, release_ret;
+
+	/* A completed batch uses the configured length, not the next RT count. */
+	ret = regmap_read(chip->regmap, chip->base + QG_INT_RT_STS_REG, &status);
+	if (ret)
+		return ret;
 
 	ret = regmap_update_bits(chip->regmap, chip->base + QG_DATA_CTL1_REG,
 				 QG_MASTER_HOLD_BIT, 0);
@@ -191,6 +204,8 @@ static int qcom_qg_capture(struct qcom_qg_chip *chip,
 	if (ret)
 		goto release;
 	count &= 0xf;
+	if (status & QG_FIFO_DONE_BIT)
+		count = length;
 	if (count > length) {
 		ret = -EINVAL;
 		goto release;
@@ -283,7 +298,7 @@ static unsigned long qcom_qg_update(struct qcom_qg_chip *chip)
 			delay = msecs_to_jiffies(10000);
 	} else {
 		/* A FIFO can wrap while the CPU sleeps; do not invent the lost charge. */
-		if (elapsed >= snapshot.full_fifo_ms ||
+		if (elapsed > snapshot.full_fifo_ms + snapshot.interval_ms * 20 + 1000 ||
 		    elapsed > snapshot.duration_ms + snapshot.interval_ms * 20 + 1000) {
 			chip->data_gap = true;
 			chip->gaps++;
@@ -341,6 +356,47 @@ static void qcom_qg_capture_work(struct work_struct *work)
 
 	power_supply_changed(chip->batt_psy);
 	queue_delayed_work(system_freezable_wq, &chip->capture_work, delay);
+}
+
+static irqreturn_t qcom_qg_fifo_done(int irq, void *data)
+{
+	struct qcom_qg_chip *chip = data;
+
+	/* Run after thaw, with the same serialization as resume and polling. */
+	mod_delayed_work(system_freezable_wq, &chip->capture_work, 0);
+	return IRQ_HANDLED;
+}
+
+/* Match the board's Android S3 qualification, without changing charger limits. */
+static int qcom_qg_configure_sleep(struct qcom_qg_chip *chip)
+{
+	u32 entry, exit, length;
+	int ret;
+
+	if (!device_property_present(chip->dev, "qcom,s3-entry-ibat-microamp"))
+		return 0;
+	ret = device_property_read_u32(chip->dev, "qcom,s3-entry-ibat-microamp", &entry);
+	if (ret)
+		return ret;
+	ret = device_property_read_u32(chip->dev, "qcom,s3-exit-ibat-microamp", &exit);
+	if (ret)
+		return ret;
+	ret = device_property_read_u32(chip->dev, "qcom,s3-entry-fifo-length", &length);
+	if (ret)
+		return ret;
+	if (!length || length > QG_MAX_FIFO || entry > 155550 ||
+	    exit > 155550 || exit < entry)
+		return -EINVAL;
+
+	ret = regmap_update_bits(chip->regmap, chip->base + QG_S3_IBAT_CTL_REG,
+				 7, length - 1);
+	if (ret)
+		return ret;
+	ret = regmap_write(chip->regmap, chip->base + QG_S3_ENTRY_IBAT_REG, entry / 610);
+	if (ret)
+		return ret;
+	return regmap_write(chip->regmap, chip->base + QG_S3_EXIT_IBAT_REG,
+			    (exit - (entry / 610) * 610) / 610);
 }
 
 static int qcom_qg_suspend(struct device *dev)
@@ -590,7 +646,7 @@ static int qcom_qg_probe(struct platform_device *pdev)
 	struct power_supply_config psy_cfg = {};
 	unsigned int subtype;
 	struct qcom_qg_snapshot snapshot = {};
-	int ret, voltage, percent;
+	int ret, voltage, percent, irq;
 
 	chip = devm_kzalloc(&pdev->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip)
@@ -678,6 +734,26 @@ static int qcom_qg_probe(struct platform_device *pdev)
 						 qcom_qg_capture_work);
 		if (ret)
 			return ret;
+		ret = qcom_qg_configure_sleep(chip);
+		if (ret)
+			return dev_err_probe(chip->dev, ret,
+					     "Couldn't configure S3 qualification\n");
+		irq = platform_get_irq_byname_optional(pdev, "fifo-done");
+		if (irq == -EPROBE_DEFER)
+			return irq;
+		if (irq > 0) {
+			ret = devm_request_threaded_irq(chip->dev, irq, NULL,
+						qcom_qg_fifo_done, IRQF_ONESHOT,
+						"qg-fifo-done", chip);
+			if (ret)
+				return dev_err_probe(chip->dev, ret, "Couldn't request FIFO IRQ\n");
+			ret = devm_device_init_wakeup(chip->dev);
+			if (ret)
+				return ret;
+			ret = devm_pm_set_wake_irq(chip->dev, irq);
+			if (ret)
+				return ret;
+		}
 		chip->estimator_enabled = true;
 		queue_delayed_work(system_freezable_wq, &chip->capture_work,
 				   msecs_to_jiffies(QG_CAPTURE_PERIOD_MS));
