@@ -2504,13 +2504,17 @@ static int wcd937x_soc_codec_probe(struct snd_soc_component *component)
 	u32 chipid;
 
 	ret = sdw_slave_wait_for_init(wcd937x->tx_sdw_dev, 5000);
-	if (ret)
+	if (ret) {
+		dev_err(dev, "SoundWire initialization wait failed: %d\n", ret);
 		return ret;
+	}
 
 	snd_soc_component_init_regmap(component, wcd937x->regmap);
 	ret = pm_runtime_resume_and_get(dev);
-	if (ret < 0)
+	if (ret < 0) {
+		dev_err(dev, "Codec runtime resume failed: %d\n", ret);
 		return ret;
+	}
 
 	chipid = (snd_soc_component_read(component,
 					 WCD937X_DIGITAL_EFUSE_REG_0) & 0x1e) >> 1;

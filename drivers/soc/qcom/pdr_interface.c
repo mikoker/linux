@@ -82,6 +82,7 @@ static int pdr_locator_new_server(struct qmi_handle *qmi,
 	pdr->locator_addr.sq_node = svc->node;
 	pdr->locator_addr.sq_port = svc->port;
 
+	pr_info("PDR: locator available node=%u port=%u\n", svc->node, svc->port);
 	pdr->locator_init_complete = true;
 	mutex_unlock(&pdr->lock);
 
@@ -152,6 +153,8 @@ static int pdr_register_listener(struct pdr_handle *pdr,
 	}
 
 	pds->state = resp.curr_state;
+	pr_info("PDR: listener %s initial state=%u\n",
+		pds->service_path, pds->state);
 
 	return 0;
 }
@@ -199,6 +202,8 @@ static int pdr_notifier_new_server(struct qmi_handle *qmi,
 	list_for_each_entry(pds, &pdr->lookups, node) {
 		if (pds->service == svc->service &&
 		    pds->instance == svc->instance) {
+			pr_info("PDR: notifier %s node=%u port=%u instance=%u\n",
+			pds->service_path, svc->node, svc->port, svc->instance);
 			pds->service_connected = true;
 			pds->need_notifier_register = true;
 			pds->addr.sq_family = AF_QIPCRTR;
@@ -490,6 +495,8 @@ static void pdr_locator_work(struct work_struct *work)
 			continue;
 		}
 
+		pr_info("PDR: located %s path=%s instance=%u\n",
+			pds->service_name, pds->service_path, pds->instance);
 		pds->need_locator_lookup = false;
 	}
 	mutex_unlock(&pdr->list_lock);

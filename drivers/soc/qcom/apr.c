@@ -578,6 +578,7 @@ static void apr_pd_status(int state, char *svc_path, void *priv)
 {
 	struct packet_router *apr = (struct packet_router *)priv;
 
+	dev_info(apr->dev, "PDR status path=%s state=%d\n", svc_path, state);
 	switch (state) {
 	case SERVREG_SERVICE_STATE_UP:
 		of_register_apr_devices(apr->dev, svc_path);
