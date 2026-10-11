@@ -27,6 +27,8 @@
 #define MIUS_MODULE_TX		0x1000a211
 #define MIUS_EVENT_OPCODE	0x0ff10208
 #define MIUS_PARAM_ENABLE	1
+#define MIUS_PARAM_CONFIG	2
+#define MIUS_CONFIG_RX_DEVICE	43
 #define MIUS_TX_PSEUDOPORT	0x8002
 #define AFE_PSEUDOPORT_CMD_START	0x000100cf
 #define AFE_PSEUDOPORT_CMD_STOP	0x000100d0
@@ -1235,6 +1237,19 @@ int q6afe_port_mius_enable(struct q6afe_port *port, bool enable)
 				     MIUS_MODULE_TX, sizeof(payload));
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_enable);
+
+int q6afe_port_mius_rx_device(struct q6afe_port *port, unsigned int device)
+{
+	__le32 payload[3] = { cpu_to_le32(MIUS_CONFIG_RX_DEVICE),
+			      cpu_to_le32(device), 0 };
+
+	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4 || device > 2)
+		return -EINVAL;
+
+	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_CONFIG,
+				     MIUS_MODULE_TX, sizeof(payload));
+}
+EXPORT_SYMBOL_GPL(q6afe_port_mius_rx_device);
 
 int q6afe_port_mius_tx(struct q6afe_port *port, bool enable)
 {

@@ -37,6 +37,7 @@ struct q6afe_dai_data {
 	struct mutex mius_lock;
 	bool mius_enabled;
 	bool mius_tx_started;
+	unsigned int mius_rx_device;
 };
 
 static int q6afe_mius_stop(struct q6afe_dai_data *data)
@@ -99,6 +100,12 @@ static int q6afe_mius_put(struct snd_kcontrol *kcontrol,
 	} else {
 		if (!enable && data->mius_tx_started)
 			return -EBUSY;
+		if (enable) {
+			ret = q6afe_port_mius_rx_device(data->port[TX_CODEC_DMA_TX_4],
+						       data->mius_rx_device);
+			if (ret)
+				return ret;
+		}
 		ret = q6afe_port_mius_enable(data->port[TX_CODEC_DMA_TX_4], enable);
 	}
 	if (ret && enable) {
@@ -114,7 +121,39 @@ static int q6afe_mius_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
+static int q6afe_mius_rx_device_get(struct snd_kcontrol *kcontrol,
+				  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct q6afe_dai_data *data = dev_get_drvdata(component->dev);
+
+	guard(mutex)(&data->mius_lock);
+	ucontrol->value.integer.value[0] = data->mius_rx_device;
+	return 0;
+}
+
+static int q6afe_mius_rx_device_put(struct snd_kcontrol *kcontrol,
+				  struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct q6afe_dai_data *data = dev_get_drvdata(component->dev);
+	long device = ucontrol->value.integer.value[0];
+
+	if (device < 0 || device > 2)
+		return -EINVAL;
+	guard(mutex)(&data->mius_lock);
+	if (data->mius_enabled || data->mius_tx_started)
+		return -EBUSY;
+	if (data->mius_rx_device == device)
+		return 0;
+	/* Apply on every engine activation, including after DSP recovery. */
+	data->mius_rx_device = device;
+	return 1;
+}
+
 static const struct snd_kcontrol_new q6afe_mius_controls[] = {
+	SOC_SINGLE_EXT("MIUS RX Device", SND_SOC_NOPM, 0, 2, 0,
+		       q6afe_mius_rx_device_get, q6afe_mius_rx_device_put),
 	SOC_SINGLE_BOOL_EXT("MIUS Engine Switch", 0, q6afe_mius_get, q6afe_mius_put),
 	SOC_SINGLE_BOOL_EXT("MIUS TX Port Switch", 1, q6afe_mius_get, q6afe_mius_put),
 };

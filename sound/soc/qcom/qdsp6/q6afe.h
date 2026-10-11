@@ -251,6 +251,7 @@ struct q6afe_port *q6afe_port_get_from_id(struct device *dev, int id);
 int q6afe_port_start(struct q6afe_port *port);
 int q6afe_port_stop(struct q6afe_port *port);
 int q6afe_port_mius_enable(struct q6afe_port *port, bool enable);
+int q6afe_port_mius_rx_device(struct q6afe_port *port, unsigned int device);
 int q6afe_port_mius_tx(struct q6afe_port *port, bool enable);
 void q6afe_port_put(struct q6afe_port *port);
 int q6afe_get_port_id(int index);
