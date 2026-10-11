@@ -27,6 +27,9 @@
 #define MIUS_MODULE_TX		0x1000a211
 #define MIUS_EVENT_OPCODE	0x0ff10208
 #define MIUS_PARAM_ENABLE	1
+#define MIUS_TX_PSEUDOPORT	0x8002
+#define AFE_PSEUDOPORT_CMD_START	0x000100cf
+#define AFE_PSEUDOPORT_CMD_STOP	0x000100d0
 
 /* AFE CMDs */
 #define AFE_PORT_CMD_DEVICE_START	0x000100E5
@@ -1020,6 +1023,8 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 		case AFE_PORT_CMD_SET_PARAM_V2:
 		case AFE_PORT_CMD_DEVICE_STOP:
 		case AFE_PORT_CMD_DEVICE_START:
+		case AFE_PSEUDOPORT_CMD_START:
+		case AFE_PSEUDOPORT_CMD_STOP:
 		case AFE_SVC_CMD_SET_PARAM:
 			port = q6afe_find_port(afe, hdr->token);
 			if (port) {
@@ -1230,6 +1235,30 @@ int q6afe_port_mius_enable(struct q6afe_port *port, bool enable)
 				     MIUS_MODULE_TX, sizeof(payload));
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_enable);
+
+int q6afe_port_mius_tx(struct q6afe_port *port, bool enable)
+{
+	struct {
+		struct apr_hdr hdr;
+		__le16 id;
+		__le16 timing;
+	} __packed command = {};
+	u32 opcode = enable ? AFE_PSEUDOPORT_CMD_START : AFE_PSEUDOPORT_CMD_STOP;
+
+	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
+		return -EINVAL;
+
+	command.hdr.hdr_field = APR_HDR_FIELD(APR_MSG_TYPE_SEQ_CMD,
+					    APR_HDR_LEN(APR_HDR_SIZE), APR_PKT_VER);
+	command.hdr.pkt_size = sizeof(command);
+	command.hdr.token = port->token;
+	command.hdr.opcode = opcode;
+	command.id = cpu_to_le16(MIUS_TX_PSEUDOPORT);
+	command.timing = cpu_to_le16(enable);
+
+	return afe_apr_send_pkt(port->afe, (struct apr_pkt *)&command, port, opcode);
+}
+EXPORT_SYMBOL_GPL(q6afe_port_mius_tx);
 
 static int q6afe_port_set_lpass_clock(struct q6afe_port *port,
 				 struct afe_clk_cfg *cfg)

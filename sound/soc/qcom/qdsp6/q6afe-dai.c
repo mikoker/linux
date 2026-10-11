@@ -6,6 +6,8 @@
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
+#include <linux/of.h>
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
@@ -32,7 +34,99 @@ struct q6afe_dai_data {
 	struct q6afe_port_config port_config[AFE_PORT_MAX];
 	bool is_port_started[AFE_PORT_MAX];
 	struct q6afe_dai_priv_data priv[AFE_PORT_MAX];
+	struct mutex mius_lock;
+	bool mius_enabled;
+	bool mius_tx_started;
 };
+
+static int q6afe_mius_stop(struct q6afe_dai_data *data)
+{
+	struct q6afe_port *port = data->port[TX_CODEC_DMA_TX_4];
+	int ret = 0, err;
+
+	if (data->mius_tx_started) {
+		ret = q6afe_port_mius_tx(port, false);
+		if (!ret)
+			data->mius_tx_started = false;
+	}
+	if (data->mius_enabled) {
+		err = q6afe_port_mius_enable(port, false);
+		if (!err)
+			data->mius_enabled = false;
+		if (!ret)
+			ret = err;
+	}
+	return ret;
+}
+
+static int q6afe_mius_get(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct q6afe_dai_data *data = dev_get_drvdata(component->dev);
+
+	guard(mutex)(&data->mius_lock);
+	ucontrol->value.integer.value[0] = kcontrol->private_value ?
+		data->mius_tx_started : data->mius_enabled;
+	return 0;
+}
+
+static int q6afe_mius_put(struct snd_kcontrol *kcontrol,
+			struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct q6afe_dai_data *data = dev_get_drvdata(component->dev);
+	bool enable = ucontrol->value.integer.value[0];
+	bool *state;
+	int ret, cleanup;
+
+	guard(mutex)(&data->mius_lock);
+	state = kcontrol->private_value ? &data->mius_tx_started : &data->mius_enabled;
+	if (*state == enable)
+		return 0;
+	if (enable && !data->is_port_started[TX_CODEC_DMA_TX_4])
+		return -EPIPE;
+	if (enable &&
+	    (data->port_config[TX_CODEC_DMA_TX_4].dma_cfg.sample_rate != 96000 ||
+	     data->port_config[TX_CODEC_DMA_TX_4].dma_cfg.num_channels != 1))
+		return -EINVAL;
+	if (!data->port[TX_CODEC_DMA_TX_4])
+		return -ENODEV;
+	if (kcontrol->private_value) {
+		if (enable && !data->mius_enabled)
+			return -EPIPE;
+		ret = q6afe_port_mius_tx(data->port[TX_CODEC_DMA_TX_4], enable);
+	} else {
+		if (!enable && data->mius_tx_started)
+			return -EBUSY;
+		ret = q6afe_port_mius_enable(data->port[TX_CODEC_DMA_TX_4], enable);
+	}
+	if (ret && enable) {
+		/* A timed-out request might still have reached the DSP. */
+		*state = true;
+		cleanup = q6afe_mius_stop(data);
+		if (cleanup)
+			dev_err(component->dev, "MIUS rollback failed: %d\n", cleanup);
+	}
+	if (ret)
+		return ret;
+	*state = enable;
+	return 1;
+}
+
+static const struct snd_kcontrol_new q6afe_mius_controls[] = {
+	SOC_SINGLE_BOOL_EXT("MIUS Engine Switch", 0, q6afe_mius_get, q6afe_mius_put),
+	SOC_SINGLE_BOOL_EXT("MIUS TX Port Switch", 1, q6afe_mius_get, q6afe_mius_put),
+};
+
+static int q6afe_component_probe(struct snd_soc_component *component)
+{
+	if (!of_machine_is_compatible("xiaomi,sweet"))
+		return 0;
+
+	return snd_soc_add_component_controls(component, q6afe_mius_controls,
+					     ARRAY_SIZE(q6afe_mius_controls));
+}
 
 static int q6slim_hw_params(struct snd_pcm_substream *substream,
 			    struct snd_pcm_hw_params *params,
@@ -373,6 +467,13 @@ static void q6afe_dai_shutdown(struct snd_pcm_substream *substream,
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
 	int rc;
 
+	guard(mutex)(&dai_data->mius_lock);
+	if (dai->id == TX_CODEC_DMA_TX_4) {
+		rc = q6afe_mius_stop(dai_data);
+		if (rc)
+			dev_err(dai->dev, "Failed to stop MIUS: %d\n", rc);
+	}
+
 	if (!dai_data->is_port_started[dai->id])
 		return;
 
@@ -389,6 +490,13 @@ static int q6afe_dai_prepare(struct snd_pcm_substream *substream,
 {
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
 	int rc;
+
+	guard(mutex)(&dai_data->mius_lock);
+	if (dai->id == TX_CODEC_DMA_TX_4) {
+		rc = q6afe_mius_stop(dai_data);
+		if (rc)
+			return rc;
+	}
 
 	if (dai_data->is_port_started[dai->id]) {
 		/* stop the port and restart with new port config */
@@ -685,6 +793,14 @@ static int msm_dai_q6_dai_probe(struct snd_soc_dai *dai)
 static int msm_dai_q6_dai_remove(struct snd_soc_dai *dai)
 {
 	struct q6afe_dai_data *dai_data = dev_get_drvdata(dai->dev);
+	int ret;
+
+	guard(mutex)(&dai_data->mius_lock);
+	if (dai->id == TX_CODEC_DMA_TX_4) {
+		ret = q6afe_mius_stop(dai_data);
+		if (ret)
+			dev_err(dai->dev, "Failed to stop MIUS on removal: %d\n", ret);
+	}
 
 	q6afe_port_put(dai_data->port[dai->id]);
 	dai_data->port[dai->id] = NULL;
@@ -1015,6 +1131,7 @@ static const struct snd_soc_dapm_widget q6afe_dai_widgets[] = {
 
 static const struct snd_soc_component_driver q6afe_dai_component = {
 	.name		= "q6afe-dai-component",
+	.probe		= q6afe_component_probe,
 	.dapm_widgets = q6afe_dai_widgets,
 	.num_dapm_widgets = ARRAY_SIZE(q6afe_dai_widgets),
 	.dapm_routes = q6afe_dapm_routes,
@@ -1117,6 +1234,7 @@ static int q6afe_dai_dev_probe(struct platform_device *pdev)
 	dai_data = devm_kzalloc(dev, sizeof(*dai_data), GFP_KERNEL);
 	if (!dai_data)
 		return -ENOMEM;
+	mutex_init(&dai_data->mius_lock);
 
 	dev_set_drvdata(dev, dai_data);
 	of_q6afe_parse_dai_data(dev, dai_data);
