@@ -28,6 +28,7 @@
 #define MIUS_EVENT_OPCODE	0x0ff10208
 #define MIUS_PARAM_ENABLE	1
 #define MIUS_PARAM_CONFIG	2
+#define MIUS_CONFIG_EXTERNAL_EVENT	35
 #define MIUS_CONFIG_RX_DEVICE	43
 #define MIUS_TX_PSEUDOPORT	0x8002
 #define AFE_PSEUDOPORT_CMD_START	0x000100cf
@@ -1228,13 +1229,22 @@ static int q6afe_port_set_param_v2(struct q6afe_port *port, void *data,
 int q6afe_port_mius_enable(struct q6afe_port *port, bool enable)
 {
 	__le32 payload[4] = { cpu_to_le32(enable), 0, 0, 0 };
+	__le32 screen_on[3] = { cpu_to_le32(MIUS_CONFIG_EXTERNAL_EVENT),
+			       cpu_to_le32(1), 0 };
+	int ret;
 
 	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
 		return -EINVAL;
 
 	/* The caller owns the port and must disable before tearing it down. */
-	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_ENABLE,
-				     MIUS_MODULE_TX, sizeof(payload));
+	ret = q6afe_port_set_param_v2(port, payload, MIUS_PARAM_ENABLE,
+				      MIUS_MODULE_TX, sizeof(payload));
+	if (ret || !enable)
+		return ret;
+
+	/* Sweet's OEM ultrasound-screen-on route sends external event 1. */
+	return q6afe_port_set_param_v2(port, screen_on, MIUS_PARAM_CONFIG,
+				     MIUS_MODULE_TX, sizeof(screen_on));
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_enable);
 
