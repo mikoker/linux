@@ -198,7 +198,7 @@ struct q6afe_tdm_cfg {
 };
 
 struct q6afe_cdc_dma_cfg {
-	u16	sample_rate;
+	u32	sample_rate;
 	u16	bit_width;
 	u16	data_format;
 	u16	num_channels;
