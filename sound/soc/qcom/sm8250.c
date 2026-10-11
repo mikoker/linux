@@ -114,7 +114,11 @@ static int sm8250_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	}
 	if (data->mius_rx_test && cpu_dai->id == PRIMARY_MI2S_RX) {
 		rate->min = rate->max = 96000;
-		channels->min = channels->max = 1;
+		/* Sweet's OEM I2S backend is stereo S24_LE, unlike its mono FE. */
+		channels->min = channels->max = 2;
+		snd_mask_none(fmt);
+		snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S24_LE);
+		return 0;
 	}
 	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
 
@@ -137,7 +141,8 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	case PRIMARY_MI2S_RX:
 		clock_id = Q6AFE_LPASS_CLK_ID_PRI_MI2S_IBIT;
 		if (data->mius_rx_test)
-			bclk *= 2;
+			/* S24_LE occupies two 32-bit I2S slots at 96 kHz. */
+			bclk = 96000 * 2 * 32;
 		break;
 	case SECONDARY_MI2S_RX:
 		clock_id = Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT;
