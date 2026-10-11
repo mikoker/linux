@@ -11,7 +11,9 @@ maintainers:
 
 properties:
   compatible:
-    const: awinic,aw8695
+    enum:
+      - awinic,aw8624
+      - awinic,aw8695
 
   reg:
     maxItems: 1
@@ -91,11 +93,19 @@ required:
   - awinic,f0-detection-wait-time
   - awinic,f0-detection-repeat
   - awinic,f0-detection-trace
-  - awinic,boost-debug
   - awinic,tset
   - awinic,r-spare
   - awinic,bemf-upper-threshold
   - awinic,bemf-lower-threshold
+
+allOf:
+  - if:
+      properties:
+        compatible:
+          const: awinic,aw8695
+    then:
+      required:
+        - awinic,boost-debug
 
 additionalProperties: false
 
