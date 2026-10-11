@@ -190,7 +190,41 @@ static int q6afe_mius_calibration_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
+static int q6afe_mius_diagnostics_get(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	/* A request strobe has no persistent On state. */
+	ucontrol->value.integer.value[0] = 0;
+	return 0;
+}
+
+static int q6afe_mius_diagnostics_put(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct q6afe_dai_data *data = dev_get_drvdata(component->dev);
+	long request = ucontrol->value.integer.value[0];
+	int ret;
+
+	if (request != 0 && request != 1)
+		return -EINVAL;
+	if (!request)
+		return 0;
+
+	guard(mutex)(&data->mius_lock);
+	if (!data->is_port_started[TX_CODEC_DMA_TX_4] ||
+	    !data->mius_enabled || !data->mius_tx_started)
+		return -EPIPE;
+	if (!data->port[TX_CODEC_DMA_TX_4])
+		return -ENODEV;
+
+	ret = q6afe_port_mius_diagnostics(data->port[TX_CODEC_DMA_TX_4]);
+	return ret ?: 1;
+}
+
 static const struct snd_kcontrol_new q6afe_mius_controls[] = {
+	SOC_SINGLE_BOOL_EXT("MIUS Request Diagnostics", 0,
+			    q6afe_mius_diagnostics_get, q6afe_mius_diagnostics_put),
 	SND_SOC_BYTES_EXT("MIUS Calibration Data", 56,
 			  q6afe_mius_calibration_get, q6afe_mius_calibration_put),
 	SOC_SINGLE_EXT("MIUS RX Device", SND_SOC_NOPM, 0, 2, 0,

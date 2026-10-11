@@ -1298,6 +1298,19 @@ int q6afe_port_mius_rx_device(struct q6afe_port *port, unsigned int device)
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_rx_device);
 
+int q6afe_port_mius_diagnostics(struct q6afe_port *port)
+{
+	/* OEM MSC_ENGINE_DIAGNOSTICS strobe, not an engine configuration. */
+	__le32 payload[3] = { cpu_to_le32(15), 0, 0 };
+
+	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
+		return -EINVAL;
+
+	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_CONFIG,
+				     MIUS_MODULE_TX, sizeof(payload));
+}
+EXPORT_SYMBOL_GPL(q6afe_port_mius_diagnostics);
+
 int q6afe_port_mius_tx(struct q6afe_port *port, bool enable)
 {
 	struct {
