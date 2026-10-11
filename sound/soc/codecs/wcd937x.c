@@ -949,6 +949,8 @@ static int wcd937x_enable_req(struct snd_soc_dapm_widget *w,
 		snd_soc_component_update_bits(component,
 					      WCD937X_ANA_TX_CH2, BIT(6), BIT(6));
 		snd_soc_component_update_bits(component,
+					      WCD937X_ANA_TX_CH3, BIT(6), BIT(6));
+		snd_soc_component_update_bits(component,
 					      WCD937X_ANA_TX_CH3_HPF, BIT(6), BIT(6));
 		snd_soc_component_update_bits(component,
 					      WCD937X_DIGITAL_CDC_DIG_CLK_CTL, 0x70, 0x70);
@@ -960,6 +962,9 @@ static int wcd937x_enable_req(struct snd_soc_dapm_widget *w,
 					      WCD937X_ANA_TX_CH2, BIT(7), BIT(7));
 		snd_soc_component_update_bits(component,
 					      WCD937X_ANA_TX_CH3, BIT(7), BIT(7));
+		/* INP3 requires the CH3 HPF block as well as the shared ADC. */
+		snd_soc_component_update_bits(component,
+					      WCD937X_ANA_TX_CH3_HPF, BIT(7), BIT(7));
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		snd_soc_component_update_bits(component,
@@ -968,6 +973,8 @@ static int wcd937x_enable_req(struct snd_soc_dapm_widget *w,
 					      WCD937X_ANA_TX_CH2, BIT(7), 0x00);
 		snd_soc_component_update_bits(component,
 					      WCD937X_ANA_TX_CH3, BIT(7), 0x00);
+		snd_soc_component_update_bits(component,
+					      WCD937X_ANA_TX_CH3_HPF, BIT(7), 0x00);
 		snd_soc_component_update_bits(component,
 					      WCD937X_DIGITAL_CDC_DIG_CLK_CTL, BIT(4), 0x00);
 
