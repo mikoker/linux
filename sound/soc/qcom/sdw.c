@@ -84,7 +84,7 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 		if (ret < 0 && ret != -ENOTSUPP) {
 			dev_err(rtd->dev, "Failed to set sdw stream on %s\n", codec_dai->name);
 			goto err_set_stream;
-		} else if (ret == -ENOTSUPP) {
+		} else if (ret == -ENOTSUPP && cpu_dai->id != TX_CODEC_DMA_TX_4) {
 			/* Ignore unsupported */
 			continue;
 		}
