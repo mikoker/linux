@@ -496,12 +496,36 @@ enum aw8695_work_mode {
 	AW8695_CONT_MODE,
 };
 
+struct aw8695_chip_data {
+	u8 chip_id;
+	u8 anactrl;
+	u8 glb_state;
+	u8 gain;
+	bool has_boost;
+};
+
+static const struct aw8695_chip_data aw8695_chip = {
+	.chip_id = AW8695_CHIPID,
+	.anactrl = AW8695_ANACTRL,
+	.glb_state = AW8695_GLB_STATE,
+	.gain = AW8695_DATDBG,
+	.has_boost = true,
+};
+
+static const struct aw8695_chip_data aw8624_chip = {
+	.chip_id = AW8624_CHIPID,
+	.anactrl = 0x38,
+	.glb_state = 0x47,
+	.gain = 0x3b,
+};
+
 struct aw8695_data {
+	const struct aw8695_chip_data *chip;
 	struct input_dev *input_dev;
 	struct i2c_client *client;
 	struct regmap *regmap;
 	struct gpio_desc *reset_gpio;
-	bool running;
+	u16 magnitude;
 	struct work_struct play_work;
 	/* Parameters from devicetree */
 	u32 f0_preset;
@@ -613,10 +637,12 @@ static int aw8695_set_work_mode(struct aw8695_data *haptics,
 			AW8695_SYSCTRL_PLAY_MODE_MASK, AW8695_SYSCTRL_PLAY_MODE_RAM);
 		if (err)
 			return err;
-		err = regmap_update_bits(haptics->regmap, AW8695_SYSCTRL,
-			AW8695_SYSCTRL_BST_MODE_MASK, AW8695_SYSCTRL_BST_MODE_BYPASS);
-		if (err)
-			return err;
+		if (haptics->chip->has_boost) {
+			err = regmap_update_bits(haptics->regmap, AW8695_SYSCTRL,
+				AW8695_SYSCTRL_BST_MODE_MASK, AW8695_SYSCTRL_BST_MODE_BYPASS);
+			if (err)
+				return err;
+		}
 		err = aw8695_haptic_set_active(haptics);
 		if (err)
 			return err;
@@ -626,10 +652,12 @@ static int aw8695_set_work_mode(struct aw8695_data *haptics,
 			AW8695_SYSCTRL_PLAY_MODE_MASK, AW8695_SYSCTRL_PLAY_MODE_CONT);
 		if (err)
 			return err;
-		err = regmap_update_bits(haptics->regmap, AW8695_SYSCTRL,
-			AW8695_SYSCTRL_BST_MODE_MASK, AW8695_SYSCTRL_BST_MODE_BYPASS);
-		if (err)
-			return err;
+		if (haptics->chip->has_boost) {
+			err = regmap_update_bits(haptics->regmap, AW8695_SYSCTRL,
+				AW8695_SYSCTRL_BST_MODE_MASK, AW8695_SYSCTRL_BST_MODE_BYPASS);
+			if (err)
+				return err;
+		}
 		err = aw8695_haptic_set_active(haptics);
 		if (err)
 			return err;
@@ -652,7 +680,7 @@ static int aw8695_haptics_play(struct input_dev *dev, void *data,
 	if (!level)
 		level = effect->u.rumble.weak_magnitude;
 
-	haptics->running = level;
+	WRITE_ONCE(haptics->magnitude, level);
 	schedule_work(&haptics->play_work);
 
 	return 0;
@@ -671,7 +699,7 @@ static int aw8695_haptics_stop(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	err = regmap_read_poll_timeout(haptics->regmap, AW8695_GLB_STATE, read_buf,
+	err = regmap_read_poll_timeout(haptics->regmap, haptics->chip->glb_state, read_buf,
 			(read_buf & 0x0f) == 0, 2000, 2000 * 100);
 	if (err) {
 		dev_err(dev, "Did not enter standby: %d\n", err);
@@ -739,10 +767,17 @@ static void aw8695_haptics_play_work(struct work_struct *work)
 	struct device *dev = &haptics->client->dev;
 	int err;
 
-	if (haptics->running)
-		err = aw8695_haptics_start(haptics);
-	else
+	u16 magnitude = READ_ONCE(haptics->magnitude);
+
+	if (magnitude) {
+		/* The device gain is Q7: unity gain is 0x80. */
+		err = regmap_write(haptics->regmap, haptics->chip->gain,
+				   DIV_ROUND_CLOSEST((u32)magnitude * 0x80, 0xffff));
+		if (!err)
+			err = aw8695_haptics_start(haptics);
+	} else {
 		err = aw8695_haptics_stop(haptics);
+	}
 
 	if (err)
 		dev_err(dev, "Failed to execute work command: %d\n", err);
@@ -856,7 +891,7 @@ static int aw8695_haptic_get_f0(struct aw8695_data *haptics)
 		return err;
 
 	/* LRA OSC Source */
-	err = regmap_update_bits(haptics->regmap, AW8695_ANACTRL,
+	err = regmap_update_bits(haptics->regmap, haptics->chip->anactrl,
 		AW8695_ANACTRL_LRA_SRC_MASK, AW8695_ANACTRL_LRA_SRC_REG);
 	if (err)
 		return err;
@@ -906,7 +941,7 @@ static int aw8695_haptic_get_f0(struct aw8695_data *haptics)
 		(haptics->f0_det_trace + haptics->f0_det_wait) * (haptics->f0_det_repeat - 1));
 	usleep_range(f0_trace_ms * 1000, f0_trace_ms * 1000 + 500);
 
-	err = regmap_read_poll_timeout(haptics->regmap, AW8695_GLB_STATE, read_buf,
+	err = regmap_read_poll_timeout(haptics->regmap, haptics->chip->glb_state, read_buf,
 			(read_buf & 0x0f) == 0, 10000, 10000 * 50);
 	if (err) {
 		dev_err(dev, "Did not enter standby: %d\n", err);
@@ -1009,7 +1044,7 @@ static int aw8695_init(struct aw8695_data *haptics)
 		return err;
 	}
 
-	if (read_buf != AW8695_CHIPID && read_buf != AW8624_CHIPID) {
+	if (read_buf != haptics->chip->chip_id) {
 		dev_err(dev, "Chip ID mismatch: expected %x or %x, got %x\n",
 			AW8624_CHIPID, AW8695_CHIPID, read_buf);
 		return -ENODEV;
@@ -1071,15 +1106,18 @@ static int aw8695_init(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	err = regmap_write(haptics->regmap, AW8695_BSTDBG1, haptics->boost_debug[0]);
-	if (err)
-		return err;
-	err = regmap_write(haptics->regmap, AW8695_BSTDBG2, haptics->boost_debug[1]);
-	if (err)
-		return err;
-	err = regmap_write(haptics->regmap, AW8695_BSTDBG3, haptics->boost_debug[2]);
-	if (err)
-		return err;
+	if (haptics->chip->has_boost) {
+		err = regmap_write(haptics->regmap, AW8695_BSTDBG1, haptics->boost_debug[0]);
+		if (err)
+			return err;
+		err = regmap_write(haptics->regmap, AW8695_BSTDBG2, haptics->boost_debug[1]);
+		if (err)
+			return err;
+		err = regmap_write(haptics->regmap, AW8695_BSTDBG3, haptics->boost_debug[2]);
+		if (err)
+			return err;
+	}
+
 	err = regmap_write(haptics->regmap, AW8695_TSET, haptics->tset);
 	if (err)
 		return err;
@@ -1087,16 +1125,19 @@ static int aw8695_init(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	err = regmap_update_bits(haptics->regmap, AW8695_ANADBG,
-		AW8695_ANADBG_IOC_MASK, AW8695_ANADBG_IOC_4P65A);
-	if (err)
-		return err;
+	if (haptics->chip->has_boost) {
+		err = regmap_update_bits(haptics->regmap, AW8695_ANADBG,
+			AW8695_ANADBG_IOC_MASK, AW8695_ANADBG_IOC_4P65A);
+		if (err)
+			return err;
 
-	/* Set boost peak current */
-	err = regmap_update_bits(haptics->regmap, AW8695_BSTCFG,
-		AW8695_BSTCFG_PEAKCUR_MASK, AW8695_BSTCFG_PEAKCUR_2A);
-	if (err)
-		return err;
+		/* Set boost peak current */
+		err = regmap_update_bits(haptics->regmap, AW8695_BSTCFG,
+			AW8695_BSTCFG_PEAKCUR_MASK, AW8695_BSTCFG_PEAKCUR_2A);
+		if (err)
+			return err;
+
+	}
 
 	/* Adjust motorprotect config */
 	err = regmap_update_bits(haptics->regmap, AW8695_DETCTRL,
@@ -1112,16 +1153,19 @@ static int aw8695_init(struct aw8695_data *haptics)
 	if (err)
 		return err;
 
-	/* Adjust auto boost config */
-	err = regmap_update_bits(haptics->regmap, AW8695_BST_AUTO,
-		AW8695_BST_AUTO_BST_AUTOSW_MASK,
-		AW8695_BST_AUTO_BST_MANUAL_BOOST);
-	if (err)
-		return err;
+	if (haptics->chip->has_boost) {
+		/* Adjust auto boost config */
+		err = regmap_update_bits(haptics->regmap, AW8695_BST_AUTO,
+			AW8695_BST_AUTO_BST_AUTOSW_MASK,
+			AW8695_BST_AUTO_BST_MANUAL_BOOST);
+		if (err)
+			return err;
 
-	err = aw8695_haptic_offset_calibration(haptics);
-	if (err)
-		return err;
+		err = aw8695_haptic_offset_calibration(haptics);
+		if (err)
+			return err;
+
+	}
 
 	/* Set vbat compensation mode */
 	err = regmap_update_bits(haptics->regmap, AW8695_ADCTEST,
@@ -1261,6 +1305,7 @@ static int aw8695_probe(struct i2c_client *client)
 	haptics = devm_kzalloc(dev, sizeof(*haptics), GFP_KERNEL);
 	if (!haptics)
 		return -ENOMEM;
+	haptics->chip = device_get_match_data(dev);
 
 	err = of_property_read_u32(dev->of_node, "awinic,f0-preset", &haptics->f0_preset);
 	if (err)
@@ -1300,10 +1345,14 @@ static int aw8695_probe(struct i2c_client *client)
 	if (err)
 		dev_err_probe(dev, err, "Failed to read awinic,f0-detection-trace\n");
 
-	err = of_property_read_u8_array(dev->of_node, "awinic,boost-debug",
-					haptics->boost_debug, ARRAY_SIZE(haptics->boost_debug));
-	if (err)
-		return dev_err_probe(dev, err, "Failed to read awinic,boost-debug\n");
+	if (haptics->chip->has_boost) {
+		err = of_property_read_u8_array(dev->of_node, "awinic,boost-debug",
+						haptics->boost_debug,
+					 ARRAY_SIZE(haptics->boost_debug));
+		if (err)
+			return dev_err_probe(dev, err, "Failed to read awinic,boost-debug\n");
+
+	}
 
 	err = of_property_read_u8(dev->of_node, "awinic,tset", &haptics->tset);
 	if (err)
@@ -1374,8 +1423,8 @@ static int aw8695_probe(struct i2c_client *client)
 }
 
 static const struct of_device_id aw8695_of_id[] = {
-	{ .compatible = "awinic,aw8624", },
-	{ .compatible = "awinic,aw8695", },
+	{ .compatible = "awinic,aw8624", .data = &aw8624_chip },
+	{ .compatible = "awinic,aw8695", .data = &aw8695_chip },
 	{ /* sentinel */ }
 };
 
