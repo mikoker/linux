@@ -28,6 +28,7 @@ struct sm8250_snd_data {
 	struct snd_soc_jack dp_jack;
 	bool jack_setup;
 	bool mius_rx_test;
+	bool sweet_pri_clock_enabled;
 };
 
 static int sm8250_mius_rx_get(struct snd_kcontrol *kcontrol,
@@ -125,6 +126,26 @@ static int sm8250_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	return 0;
 }
 
+static int sm8250_sweet_pri_clock_disable(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	int ret;
+
+	if (!of_machine_is_compatible("xiaomi,sweet") ||
+	    cpu_dai->id != PRIMARY_MI2S_RX || !data->sweet_pri_clock_enabled)
+		return 0;
+
+	ret = snd_soc_dai_set_sysclk(cpu_dai, Q6AFE_LPASS_CLK_ID_PRI_MI2S_IBIT,
+				     0, SNDRV_PCM_STREAM_PLAYBACK);
+	if (!ret)
+		data->sweet_pri_clock_enabled = false;
+	else
+		dev_err(rtd->dev, "Failed to release sweet PRI_MI2S clock: %d\n", ret);
+
+	return ret;
+}
+
 static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 {
 	unsigned int fmt = SND_SOC_DAIFMT_BP_FP;
@@ -135,7 +156,13 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 	unsigned int bclk = MI2S_BCLK_RATE;
 	unsigned int clock_id;
+	bool sweet_primary = of_machine_is_compatible("xiaomi,sweet") &&
+			     cpu_dai->id == PRIMARY_MI2S_RX;
 	int i, ret;
+
+	/* A failed release must not be hidden by acquiring a second clock vote. */
+	if (sweet_primary && data->sweet_pri_clock_enabled)
+		return -EBUSY;
 
 	switch (cpu_dai->id) {
 	case PRIMARY_MI2S_RX:
@@ -161,19 +188,36 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 				     SNDRV_PCM_STREAM_PLAYBACK);
 	if (ret)
 		return ret;
+	if (sweet_primary)
+		data->sweet_pri_clock_enabled = true;
 
 	ret = snd_soc_dai_set_fmt(cpu_dai, fmt);
 	if (ret)
-		return ret;
+		goto err_clock;
 
 	codec_dai_fmt |= SND_SOC_DAIFMT_NB_NF | SND_SOC_DAIFMT_I2S;
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
 		ret = snd_soc_dai_set_fmt(codec_dai, codec_dai_fmt);
 		if (ret && ret != -ENOTSUPP)
-			return ret;
+			goto err_clock;
 	}
 
-	return qcom_snd_sdw_startup(substream);
+	ret = qcom_snd_sdw_startup(substream);
+	if (!ret)
+		return 0;
+
+err_clock:
+	sm8250_sweet_pri_clock_disable(rtd);
+	return ret;
+}
+
+static void sm8250_snd_shutdown(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+
+	qcom_snd_sdw_shutdown(substream);
+	/* ASoC has already called the CPU DAI shutdown and stopped its AFE port. */
+	sm8250_sweet_pri_clock_disable(rtd);
 }
 
 static int sm8250_snd_prepare(struct snd_pcm_substream *substream)
@@ -196,7 +240,7 @@ static int sm8250_snd_hw_free(struct snd_pcm_substream *substream)
 
 static const struct snd_soc_ops sm8250_be_ops = {
 	.startup = sm8250_snd_startup,
-	.shutdown = qcom_snd_sdw_shutdown,
+	.shutdown = sm8250_snd_shutdown,
 	.hw_free = sm8250_snd_hw_free,
 	.prepare = sm8250_snd_prepare,
 };
