@@ -27,6 +27,44 @@ struct sm8250_snd_data {
 	bool usb_offload_jack_setup;
 	struct snd_soc_jack dp_jack;
 	bool jack_setup;
+	bool mius_rx_test;
+};
+
+static int sm8250_mius_rx_get(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(card);
+
+	guard(mutex)(&card->pcm_mutex);
+	ucontrol->value.integer.value[0] = data->mius_rx_test;
+	return 0;
+}
+
+static int sm8250_mius_rx_put(struct snd_kcontrol *kcontrol,
+			    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_card *card = snd_kcontrol_chip(kcontrol);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(card);
+	struct snd_soc_pcm_runtime *rtd;
+	bool enable = ucontrol->value.integer.value[0];
+
+	guard(mutex)(&card->pcm_mutex);
+	if (data->mius_rx_test == enable)
+		return 0;
+	for_each_card_rtds(card, rtd) {
+		struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+
+		if (cpu_dai->id == PRIMARY_MI2S_RX && snd_soc_dai_active(cpu_dai))
+			return -EBUSY;
+	}
+	data->mius_rx_test = enable;
+	return 1;
+}
+
+static const struct snd_kcontrol_new sm8250_mius_controls[] = {
+	SOC_SINGLE_BOOL_EXT("MIUS RX 96kHz Test Switch", 0,
+			    sm8250_mius_rx_get, sm8250_mius_rx_put),
 };
 
 static int sm8250_snd_init(struct snd_soc_pcm_runtime *rtd)
@@ -65,11 +103,16 @@ static int sm8250_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 					SNDRV_PCM_HW_PARAM_CHANNELS);
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 
 	rate->min = rate->max = 48000;
 	channels->min = channels->max = 2;
 	if (of_machine_is_compatible("xiaomi,sweet") &&
 	    cpu_dai->id == TX_CODEC_DMA_TX_4) {
+		rate->min = rate->max = 96000;
+		channels->min = channels->max = 1;
+	}
+	if (data->mius_rx_test && cpu_dai->id == PRIMARY_MI2S_RX) {
 		rate->min = rate->max = 96000;
 		channels->min = channels->max = 1;
 	}
@@ -85,12 +128,16 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct snd_soc_dai *codec_dai;
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	unsigned int bclk = MI2S_BCLK_RATE;
 	unsigned int clock_id;
 	int i, ret;
 
 	switch (cpu_dai->id) {
 	case PRIMARY_MI2S_RX:
 		clock_id = Q6AFE_LPASS_CLK_ID_PRI_MI2S_IBIT;
+		if (data->mius_rx_test)
+			bclk *= 2;
 		break;
 	case SECONDARY_MI2S_RX:
 		clock_id = Q6AFE_LPASS_CLK_ID_SEC_MI2S_IBIT;
@@ -105,7 +152,7 @@ static int sm8250_snd_startup(struct snd_pcm_substream *substream)
 		return qcom_snd_sdw_startup(substream);
 	}
 
-	ret = snd_soc_dai_set_sysclk(cpu_dai, clock_id, MI2S_BCLK_RATE,
+	ret = snd_soc_dai_set_sysclk(cpu_dai, clock_id, bclk,
 				     SNDRV_PCM_STREAM_PLAYBACK);
 	if (ret)
 		return ret;
@@ -189,6 +236,10 @@ static int sm8250_platform_probe(struct platform_device *pdev)
 		return ret;
 
 	card->driver_name = of_device_get_match_data(dev);
+	if (of_machine_is_compatible("xiaomi,sweet")) {
+		card->controls = sm8250_mius_controls;
+		card->num_controls = ARRAY_SIZE(sm8250_mius_controls);
+	}
 	sm8250_add_be_ops(card);
 	return devm_snd_soc_register_card(dev, card);
 }
