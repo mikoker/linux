@@ -183,6 +183,11 @@
 		reg = <1>;
 		direction = <Q6ASM_DAI_TX>;
 	};
+
+	dai@2 {
+		reg = <2>;
+		direction = <Q6ASM_DAI_TX>;
+	};
 };
 
 &sound {
@@ -198,6 +203,26 @@
 		link-name = "MultiMedia2";
 		cpu {
 			sound-dai = <&q6asmdai 1>;
+		};
+	};
+
+	mm3-dai-link {
+		link-name = "MultiMedia3";
+		cpu {
+			sound-dai = <&q6asmdai 2>;
+		};
+	};
+
+	ultrasound-capture-dai-link {
+		link-name = "Ultrasound Capture";
+		cpu {
+			sound-dai = <&q6afedai TX_CODEC_DMA_TX_4>;
+		};
+		platform {
+			sound-dai = <&q6routing>;
+		};
+		codec {
+			sound-dai = <&wcd937x 1>, <&swr_tx 0>, <&lpass_tx_macro 1>;
 		};
 	};
 
