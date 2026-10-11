@@ -24,6 +24,10 @@
 #include "q6core.h"
 #include "q6afe.h"
 
+#define MIUS_MODULE_TX		0x1000a211
+#define MIUS_EVENT_OPCODE	0x0ff10208
+#define MIUS_PARAM_ENABLE	1
+
 /* AFE CMDs */
 #define AFE_PORT_CMD_DEVICE_START	0x000100E5
 #define AFE_PORT_CMD_DEVICE_STOP	0x000100E6
@@ -977,6 +981,30 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 	//dev_warn(afe->dev, "hdr = 0x%x cmd = 0x%x returned status = 0x%x\n",
 	//	hdr->opcode, res->opcode, res->status);
 	switch (hdr->opcode) {
+	case MIUS_EVENT_OPCODE: {
+		const __le32 *payload = data->payload;
+		u32 size, module, param;
+
+		/* OEM header: module, parameter, payload length in low 16 bits. */
+		if (data->payload_size < 3 * sizeof(*payload))
+			return -EINVAL;
+
+		module = le32_to_cpu(payload[0]);
+		param = le32_to_cpu(payload[1]);
+		size = le32_to_cpu(payload[2]) & 0xffff;
+		if (size > data->payload_size - 3 * sizeof(*payload))
+			return -EINVAL;
+		if (module != MIUS_MODULE_TX)
+			return -EINVAL;
+
+		/* Keep raw events until the sweet event parameter is verified. */
+		dev_dbg_ratelimited(afe->dev, "MIUS event parameter %#x size %u\n",
+				    param, size);
+		if (size >= sizeof(*payload))
+			dev_dbg_ratelimited(afe->dev, "MIUS first data word %#x\n",
+					    le32_to_cpu(payload[3]));
+		break;
+	}
 	case APR_BASIC_RSP_RESULT: {
 		if (res->status) {
 			// EOK = 0
@@ -1189,6 +1217,19 @@ static int q6afe_port_set_param_v2(struct q6afe_port *port, void *data,
 
 	return ret;
 }
+
+int q6afe_port_mius_enable(struct q6afe_port *port, bool enable)
+{
+	__le32 payload[4] = { cpu_to_le32(enable), 0, 0, 0 };
+
+	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
+		return -EINVAL;
+
+	/* The caller owns the port and must disable before tearing it down. */
+	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_ENABLE,
+				     MIUS_MODULE_TX, sizeof(payload));
+}
+EXPORT_SYMBOL_GPL(q6afe_port_mius_enable);
 
 static int q6afe_port_set_lpass_clock(struct q6afe_port *port,
 				 struct afe_clk_cfg *cfg)
