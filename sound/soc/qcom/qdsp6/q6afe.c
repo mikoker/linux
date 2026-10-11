@@ -992,6 +992,7 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 	switch (hdr->opcode) {
 	case MIUS_EVENT_OPCODE: {
 		const __le32 *payload = data->payload;
+		static DEFINE_RATELIMIT_STATE(mius_dump_rs, 5 * HZ, 5);
 		u32 size, module, param;
 
 		/* OEM header: module, parameter, payload length in low 16 bits. */
@@ -1005,6 +1006,11 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 			return -EINVAL;
 		if (module != MIUS_MODULE_TX)
 			return -EINVAL;
+
+		/* Bound diagnostic output even for unexpectedly large DSP data. */
+		if (__ratelimit(&mius_dump_rs))
+			print_hex_dump_debug("MIUS raw: ", DUMP_PREFIX_OFFSET, 16, 1,
+					     payload + 3, min_t(u32, size, 460), false);
 
 		/* Keep raw events until the sweet event parameter is verified. */
 		dev_dbg_ratelimited(afe->dev, "MIUS event parameter %#x size %u\n",
