@@ -1268,7 +1268,7 @@ static int q6afe_dai_dev_probe(struct platform_device *pdev)
 	struct snd_soc_dai_driver *dais;
 	struct q6afe_dai_data *dai_data;
 	struct device *dev = &pdev->dev;
-	int num_dais;
+	int num_dais, i;
 
 	dai_data = devm_kzalloc(dev, sizeof(*dai_data), GFP_KERNEL);
 	if (!dai_data)
@@ -1285,6 +1285,19 @@ static int q6afe_dai_dev_probe(struct platform_device *pdev)
 	cfg.q6dma_ops = &q6dma_ops;
 	cfg.q6usb_ops = &q6afe_usb_ops;
 	dais = q6dsp_audio_ports_set_config(dev, &cfg, &num_dais);
+
+	/* Sweet's ultrasound RX uses the supported 96 kHz I2S configuration. */
+	if (of_machine_is_compatible("xiaomi,sweet")) {
+		dais = devm_kmemdup(dev, dais, num_dais * sizeof(*dais), GFP_KERNEL);
+		if (!dais)
+			return -ENOMEM;
+		for (i = 0; i < num_dais; i++) {
+			if (dais[i].id != PRIMARY_MI2S_RX)
+				continue;
+			dais[i].playback.rates |= SNDRV_PCM_RATE_96000;
+			dais[i].playback.rate_max = 96000;
+		}
+	}
 
 	return devm_snd_soc_register_component(dev, &q6afe_dai_component, dais, num_dais);
 }

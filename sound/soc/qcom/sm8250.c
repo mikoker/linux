@@ -302,7 +302,17 @@ static int sm8250_mius_hostless_startup(struct snd_pcm_substream *substream)
 	return sm8250_snd_startup(substream);
 }
 
+static int sm8250_mius_hostless_hw_params(struct snd_pcm_substream *substream,
+					struct snd_pcm_hw_params *params)
+{
+	if (params_rate(params) != 96000 || params_channels(params) != 2 ||
+	    params_format(params) != SNDRV_PCM_FORMAT_S24_LE)
+		return -EINVAL;
+	return 0;
+}
+
 static const struct snd_soc_ops sm8250_mius_hostless_ops = {
+	.hw_params = sm8250_mius_hostless_hw_params,
 	.startup = sm8250_mius_hostless_startup,
 	.shutdown = sm8250_snd_shutdown,
 	.prepare = sm8250_snd_prepare,
