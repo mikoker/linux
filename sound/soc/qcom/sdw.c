@@ -5,8 +5,15 @@
 #include <dt-bindings/sound/qcom,lpass.h>
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/module.h>
+#include <linux/of.h>
 #include <sound/soc.h>
 #include "sdw.h"
+
+static bool qcom_snd_sweet_tx(const struct snd_soc_dai *dai)
+{
+	return of_machine_is_compatible("xiaomi,sweet") &&
+		(dai->id == TX_CODEC_DMA_TX_3 || dai->id == TX_CODEC_DMA_TX_4);
+}
 
 static bool qcom_snd_is_sdw_dai(int id)
 {
@@ -69,10 +76,19 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 	struct sdw_stream_runtime *sruntime;
 	struct snd_soc_dai *codec_dai;
 	u32 rx_ch_cnt = 0, tx_ch_cnt = 0;
-	int ret, i, j;
+	int ret, i, j, attached = 0;
 
 	if (!qcom_snd_is_sdw_dai(cpu_dai->id))
 		return 0;
+
+	if (qcom_snd_sweet_tx(cpu_dai)) {
+		/* TX3 and TX4 share the WCD TX DAI and its single runtime. */
+		for_each_rtd_codec_dais(rtd, i, codec_dai) {
+			sruntime = snd_soc_dai_get_stream(codec_dai, substream->stream);
+			if (!IS_ERR_OR_NULL(sruntime))
+				return -EBUSY;
+		}
+	}
 
 	sruntime = sdw_alloc_stream(cpu_dai->name, SDW_STREAM_PCM);
 	if (!sruntime)
@@ -88,6 +104,7 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 			/* Ignore unsupported */
 			continue;
 		}
+		attached = i + 1;
 
 		ret = snd_soc_dai_get_channel_map(codec_dai, &tx_ch_cnt, tx_ch,
 						  &rx_ch_cnt, rx_ch);
@@ -122,9 +139,20 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 		}
 	}
 
+	if (qcom_snd_sweet_tx(cpu_dai))
+		snd_soc_dai_set_dma_data(cpu_dai, substream, sruntime);
+
 	return 0;
 
 err_set_stream:
+	if (qcom_snd_sweet_tx(cpu_dai)) {
+		/* Only detach DAIs already attached by this startup. */
+		for_each_rtd_codec_dais(rtd, j, codec_dai) {
+			if (j >= attached)
+				break;
+			snd_soc_dai_set_stream(codec_dai, NULL, substream->stream);
+		}
+	}
 	sdw_release_stream(sruntime);
 
 	return ret;
@@ -184,6 +212,10 @@ struct sdw_stream_runtime *qcom_snd_sdw_get_stream(struct snd_pcm_substream *sub
 	if (!qcom_snd_is_sdw_dai(cpu_dai->id))
 		return NULL;
 
+	/* Keep the owning BE's pointer, not another BE's codec pointer. */
+	if (qcom_snd_sweet_tx(cpu_dai))
+		return snd_soc_dai_get_dma_data(cpu_dai, substream);
+
 	for_each_rtd_codec_dais(rtd, i, codec_dai) {
 		sruntime = snd_soc_dai_get_stream(codec_dai, substream->stream);
 		if (sruntime != ERR_PTR(-ENOTSUPP))
@@ -195,7 +227,17 @@ EXPORT_SYMBOL_GPL(qcom_snd_sdw_get_stream);
 
 void qcom_snd_sdw_shutdown(struct snd_pcm_substream *substream)
 {
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct sdw_stream_runtime *sruntime = qcom_snd_sdw_get_stream(substream);
+	struct snd_soc_dai *codec_dai;
+	int i;
+
+	if (sruntime && qcom_snd_sweet_tx(cpu_dai)) {
+		for_each_rtd_codec_dais(rtd, i, codec_dai)
+			snd_soc_dai_set_stream(codec_dai, NULL, substream->stream);
+		snd_soc_dai_set_dma_data(cpu_dai, substream, NULL);
+	}
 
 	sdw_release_stream(sruntime);
 }
