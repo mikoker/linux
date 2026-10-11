@@ -4,6 +4,7 @@
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/sizes.h>
 #include <linux/platform_device.h>
 #include <sound/soc.h>
 #include <sound/soc-dapm.h>
@@ -245,6 +246,116 @@ static const struct snd_soc_ops sm8250_be_ops = {
 	.prepare = sm8250_snd_prepare,
 };
 
+/* Diagnostic hostless RX: local PCM bookkeeping, no Q6ASM/ADM session. */
+static const struct snd_pcm_hardware sm8250_mius_hostless_hw = {
+	.info = SNDRV_PCM_INFO_INTERLEAVED | SNDRV_PCM_INFO_BLOCK_TRANSFER,
+	.formats = SNDRV_PCM_FMTBIT_S24_LE,
+	.rates = SNDRV_PCM_RATE_96000,
+	.rate_min = 96000,
+	.rate_max = 96000,
+	.channels_min = 2,
+	.channels_max = 2,
+	.buffer_bytes_max = SZ_64K,
+	.period_bytes_min = 1024,
+	.period_bytes_max = SZ_32K,
+	.periods_min = 2,
+	.periods_max = 64,
+};
+
+static int sm8250_mius_hostless_open(struct snd_soc_component *component,
+				   struct snd_pcm_substream *substream)
+{
+	snd_soc_set_runtime_hwparams(substream, &sm8250_mius_hostless_hw);
+	return 0;
+}
+
+static int sm8250_mius_hostless_construct(struct snd_soc_component *component,
+					struct snd_soc_pcm_runtime *rtd)
+{
+	return snd_pcm_set_managed_buffer_all(rtd->pcm, SNDRV_DMA_TYPE_VMALLOC,
+					     NULL, SZ_64K, SZ_64K);
+}
+
+static snd_pcm_uframes_t
+sm8250_mius_hostless_pointer(struct snd_soc_component *component,
+			    struct snd_pcm_substream *substream)
+{
+	/* No host DMA: a priming frame stays local and is never sent to DSP. */
+	return 0;
+}
+
+static const struct snd_soc_component_driver sm8250_mius_hostless_component = {
+	.name = "sweet-mius-hostless",
+	.open = sm8250_mius_hostless_open,
+	.pcm_new = sm8250_mius_hostless_construct,
+	.pointer = sm8250_mius_hostless_pointer,
+};
+
+static int sm8250_mius_hostless_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
+	struct sm8250_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+
+	/* Explicit opt-in, and the shared PRI clock owner rejects overlap. */
+	if (!data->mius_rx_test)
+		return -EPERM;
+	return sm8250_snd_startup(substream);
+}
+
+static const struct snd_soc_ops sm8250_mius_hostless_ops = {
+	.startup = sm8250_mius_hostless_startup,
+	.shutdown = sm8250_snd_shutdown,
+	.prepare = sm8250_snd_prepare,
+	.hw_free = sm8250_snd_hw_free,
+};
+
+static int sm8250_add_mius_hostless(struct snd_soc_card *card)
+{
+	struct snd_soc_dai_link_component *platform;
+	struct snd_soc_dai_link *links, *primary = NULL, *link;
+	int i, ret;
+
+	for_each_card_prelinks(card, i, link) {
+		if (link->no_pcm && link->id == PRIMARY_MI2S_RX) {
+			primary = link;
+			break;
+		}
+	}
+	if (!primary)
+		return -EINVAL;
+
+	links = devm_kcalloc(card->dev, card->num_links + 1,
+			     sizeof(*links), GFP_KERNEL);
+	platform = devm_kzalloc(card->dev, sizeof(*platform), GFP_KERNEL);
+	if (!links || !platform)
+		return -ENOMEM;
+	memcpy(links, card->dai_link, card->num_links * sizeof(*links));
+	link = &links[card->num_links];
+	/* Reuse the physical DAIs, not the routing/ASM platform. */
+	link->cpus = primary->cpus;
+	link->num_cpus = primary->num_cpus;
+	link->codecs = primary->codecs;
+	link->num_codecs = primary->num_codecs;
+	platform->of_node = card->dev->of_node;
+	link->platforms = platform;
+	link->num_platforms = 1;
+	link->name = "MIUS Hostless RX";
+	link->stream_name = "MIUS Hostless RX";
+	link->id = PRIMARY_MI2S_RX;
+	link->playback_only = 1;
+	link->nonatomic = 1;
+	link->ignore_pmdown_time = 1;
+	link->ops = &sm8250_mius_hostless_ops;
+	ret = devm_snd_soc_register_component(card->dev,
+					     &sm8250_mius_hostless_component,
+					     NULL, 0);
+	if (ret)
+		return ret;
+	card->dai_link = links;
+	card->num_links++;
+	return 0;
+}
+
 static void sm8250_add_be_ops(struct snd_soc_card *card)
 {
 	struct snd_soc_dai_link *link;
@@ -290,6 +401,11 @@ static int sm8250_platform_probe(struct platform_device *pdev)
 		card->num_controls = ARRAY_SIZE(sm8250_mius_controls);
 	}
 	sm8250_add_be_ops(card);
+	if (of_machine_is_compatible("xiaomi,sweet")) {
+		ret = sm8250_add_mius_hostless(card);
+		if (ret)
+			return ret;
+	}
 	return devm_snd_soc_register_card(dev, card);
 }
 
