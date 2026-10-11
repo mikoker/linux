@@ -99,8 +99,9 @@
 		wcd937x_tx: codec@0,3 {
 			compatible = "sdw20217010a00";
 			reg = <0 3>;
-			qcom,tx-port-mapping = <2 2 3 4>;
-			qcom,tx-channel-mapping = /bits/ 8 <1 2 1 1 2 3 3 4 1 2 3>;
+			/* OEM maps codec ADC2/3 to master ADC3/4, port 3 channels 1/2. */
+			qcom,tx-port-mapping = <2 3 3 4>;
+			qcom,tx-channel-mapping = /bits/ 8 <1 1 2 1 2 3 3 4 1 2 3>;
 		};
 	};
 
