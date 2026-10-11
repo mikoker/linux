@@ -103,6 +103,7 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 	switch (cpu_dai->id) {
 	case RX_CODEC_DMA_RX_0:
 	case TX_CODEC_DMA_TX_3:
+	case TX_CODEC_DMA_TX_4:
 		if (tx_ch_cnt || rx_ch_cnt) {
 			for_each_rtd_codec_dais(rtd, j, codec_dai) {
 				ret = snd_soc_dai_set_channel_map(codec_dai,
