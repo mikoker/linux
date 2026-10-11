@@ -28,6 +28,7 @@
 #define MIUS_EVENT_OPCODE	0x0ff10208
 #define MIUS_PARAM_ENABLE	1
 #define MIUS_PARAM_CONFIG	2
+#define MIUS_PARAM_CALIBRATION	7
 #define MIUS_CONFIG_MICROPHONE_INDEX	4
 #define MIUS_CONFIG_SUSPEND		32
 #define MIUS_CONFIG_EXTERNAL_EVENT	35
@@ -1227,6 +1228,20 @@ static int q6afe_port_set_param_v2(struct q6afe_port *port, void *data,
 
 	return ret;
 }
+
+int q6afe_port_mius_calibration(struct q6afe_port *port, const u8 *data)
+{
+	u8 payload[56];
+
+	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
+		return -EINVAL;
+
+	/* OEM Mi_Ultrasound Calibration Data: 14 little-endian float words. */
+	memcpy(payload, data, sizeof(payload));
+	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_CALIBRATION,
+				     MIUS_MODULE_TX, sizeof(payload));
+}
+EXPORT_SYMBOL_GPL(q6afe_port_mius_calibration);
 
 int q6afe_port_mius_enable(struct q6afe_port *port, bool enable)
 {
