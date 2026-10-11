@@ -560,6 +560,20 @@ static const u8 aw8695_sine_waveform[] = {
 	0xe1, 0xe6, 0xeb, 0xf0, 0xf5, 0xfa
 };
 
+/* 24 kHz / 117 samples = 205.13 Hz, matching the sweet LRA. */
+static const u8 aw8624_sine_waveform[] = {
+	0x00, 0x05, 0x09, 0x0d, 0x12, 0x16, 0x1b, 0x1f, 0x23, 0x27, 0x2b, 0x2f,
+	0x32, 0x36, 0x39, 0x3d, 0x40, 0x42, 0x45, 0x48, 0x4a, 0x4c, 0x4e, 0x4f,
+	0x51, 0x52, 0x53, 0x53, 0x54, 0x54, 0x54, 0x54, 0x53, 0x52, 0x51, 0x50,
+	0x4f, 0x4d, 0x4b, 0x49, 0x46, 0x44, 0x41, 0x3e, 0x3b, 0x38, 0x34, 0x31,
+	0x2d, 0x29, 0x25, 0x21, 0x1d, 0x18, 0x14, 0x10, 0x0b, 0x07, 0x02, 0xfe,
+	0xf9, 0xf5, 0xf0, 0xec, 0xe8, 0xe3, 0xdf, 0xdb, 0xd7, 0xd3, 0xcf, 0xcc,
+	0xc8, 0xc5, 0xc2, 0xbf, 0xbc, 0xba, 0xb7, 0xb5, 0xb3, 0xb1, 0xb0, 0xaf,
+	0xae, 0xad, 0xac, 0xac, 0xac, 0xac, 0xad, 0xad, 0xae, 0xaf, 0xb1, 0xb2,
+	0xb4, 0xb6, 0xb8, 0xbb, 0xbe, 0xc0, 0xc3, 0xc7, 0xca, 0xce, 0xd1, 0xd5,
+	0xd9, 0xdd, 0xe1, 0xe5, 0xea, 0xee, 0xf3, 0xf7, 0xfb,
+};
+
 /*
  * Header that gets written to AW8695 SRAM that describes the available
  * waveforms being transferred afterwards.
@@ -1196,9 +1210,20 @@ static int aw8695_init(struct aw8695_data *haptics)
 
 static int aw8695_ram_init(struct aw8695_data *haptics)
 {
+	struct aw8695_sram_waveform_header header = sram_waveform_header;
+	const u8 *waveform = aw8695_sine_waveform;
+	size_t waveform_size = ARRAY_SIZE(aw8695_sine_waveform);
 	unsigned char *ptr;
 	int err;
 	int i;
+
+	if (haptics->chip->chip_id == AW8624_CHIPID) {
+		waveform = aw8624_sine_waveform;
+		waveform_size = ARRAY_SIZE(aw8624_sine_waveform);
+		header.waveform_address[0].end_address =
+			cpu_to_be16(AW8695_RAM_BASE_ADDR + sizeof(header) +
+				    waveform_size - 1);
+	}
 
 	/* Enable SRAM init */
 	err = regmap_update_bits(haptics->regmap, AW8695_SYSCTRL,
@@ -1217,8 +1242,8 @@ static int aw8695_ram_init(struct aw8695_data *haptics)
 		return err;
 
 	/* Write waveform header */
-	ptr = (unsigned char *) &sram_waveform_header;
-	for (i = 0; i < sizeof(sram_waveform_header); i++) {
+	ptr = (unsigned char *)&header;
+	for (i = 0; i < sizeof(header); i++) {
 		err = regmap_write(haptics->regmap, AW8695_RAMDATA,
 			ptr[i]);
 		if (err)
@@ -1226,9 +1251,9 @@ static int aw8695_ram_init(struct aw8695_data *haptics)
 	}
 
 	/* Write waveform data */
-	for (i = 0; i < ARRAY_SIZE(aw8695_sine_waveform); i++) {
+	for (i = 0; i < waveform_size; i++) {
 		err = regmap_write(haptics->regmap, AW8695_RAMDATA,
-			aw8695_sine_waveform[i]);
+			waveform[i]);
 		if (err)
 			return err;
 	}
