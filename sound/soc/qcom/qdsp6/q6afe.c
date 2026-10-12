@@ -4,6 +4,9 @@
 
 #include <dt-bindings/sound/qcom,q6afe.h>
 #include <linux/slab.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
+#include <linux/unaligned.h>
 #include <linux/kernel.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
@@ -386,7 +389,23 @@
 #define AFE_CMD_RESP_NONE	1
 #define AFE_CLK_TOKEN		1024
 
+struct q6afe_mius_snapshot {
+	u32 module, parameter, size, copied;
+	u8 payload[460];
+};
+
+struct q6afe_mius_stats {
+	u64 events, malformed, foreign_module, unknown_opcode;
+	u64 states[3], transitions, payload_changes, diagnostics;
+	bool state_valid;
+	u32 state, last_opcode;
+	struct q6afe_mius_snapshot engine, latest;
+};
+
 struct q6afe {
+	spinlock_t mius_stats_lock;
+	struct q6afe_mius_stats mius_stats;
+	bool mius_observe;
 	struct apr_device *apr;
 	struct device *dev;
 	struct q6core_svc_api_info ainfo;
@@ -976,6 +995,106 @@ static struct q6afe_port *q6afe_find_port(struct q6afe *afe, int token)
 	return ret;
 }
 
+static void q6afe_mius_snapshot_show(struct seq_file *s, const char *name,
+				     const struct q6afe_mius_snapshot *p)
+{
+	unsigned int i;
+
+	seq_printf(s, "%s module=%#x parameter=%#x size=%u copied=%u\n",
+		   name, p->module, p->parameter, p->size, p->copied);
+	for (i = 0; i < p->copied; i += 16)
+		seq_printf(s, "%04x: %*phN\n", i, min(16U, p->copied - i),
+			   p->payload + i);
+}
+
+static int q6afe_mius_stats_show(struct seq_file *s, void *unused)
+{
+	struct q6afe *afe = s->private;
+	struct q6afe_mius_stats *st;
+	unsigned long flags;
+
+	st = kmalloc_obj(*st);
+	if (!st)
+		return -ENOMEM;
+	spin_lock_irqsave(&afe->mius_stats_lock, flags);
+	*st = afe->mius_stats;
+	spin_unlock_irqrestore(&afe->mius_stats_lock, flags);
+	seq_printf(s, "events=%llu malformed=%llu foreign_module=%llu unknown_opcode=%llu last_opcode=%#x\n",
+		   st->events, st->malformed, st->foreign_module,
+		   st->unknown_opcode, st->last_opcode);
+	seq_printf(s, "zero=%llu one=%llu other=%llu transitions=%llu payload_changes=%llu diagnostics=%llu state_valid=%u state=%#x\n",
+		   st->states[0], st->states[1], st->states[2], st->transitions,
+		   st->payload_changes, st->diagnostics, st->state_valid, st->state);
+	q6afe_mius_snapshot_show(s, "engine", &st->engine);
+	q6afe_mius_snapshot_show(s, "latest", &st->latest);
+	kfree(st);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(q6afe_mius_stats);
+
+static void q6afe_mius_debugfs_remove(void *entry)
+{
+	debugfs_remove_recursive(entry);
+}
+
+static void q6afe_mius_observe_event(struct q6afe *afe,
+				    const struct apr_resp_pkt *data)
+{
+	struct q6afe_mius_stats *st = &afe->mius_stats;
+	struct q6afe_mius_snapshot *p;
+	const u8 *bytes = data->payload;
+	unsigned long flags;
+	u32 module, parameter, size, word = 0;
+	bool changed = false;
+
+	spin_lock_irqsave(&afe->mius_stats_lock, flags);
+	st->events++;
+	if (data->payload_size < 12)
+		goto malformed;
+	module = get_unaligned_le32(bytes);
+	parameter = get_unaligned_le32(bytes + 4);
+	size = get_unaligned_le32(bytes + 8) & 0xffff;
+	if (size > data->payload_size - 12)
+		goto malformed;
+	if (module != MIUS_MODULE_TX)
+		st->foreign_module++;
+	if (parameter == 17)
+		st->diagnostics++;
+	p = &st->latest;
+	p->module = module;
+	p->parameter = parameter;
+	p->size = size;
+	p->copied = min_t(u32, size, sizeof(p->payload));
+	memcpy(p->payload, bytes + 12, p->copied);
+	if (module == MIUS_MODULE_TX && parameter == 3) {
+		if (st->engine.parameter &&
+		    (st->engine.size != size ||
+		     memcmp(st->engine.payload, p->payload, p->copied)))
+			st->payload_changes++;
+		st->engine = *p;
+		if (size >= 4) {
+			word = get_unaligned_le32(bytes + 12);
+			st->states[min(word, 2U)]++;
+			changed = st->state_valid && st->state != word;
+			if (changed)
+				st->transitions++;
+			st->state = word;
+			st->state_valid = true;
+		}
+	}
+	spin_unlock_irqrestore(&afe->mius_stats_lock, flags);
+	if (module != MIUS_MODULE_TX)
+		dev_info_ratelimited(afe->dev, "MIUS foreign module %#x parameter %#x size %u\n",
+				     module, parameter, size);
+	if (changed)
+		dev_info_ratelimited(afe->dev, "MIUS state changed to %#x (see debugfs counters)\n",
+				     word);
+	return;
+malformed:
+	st->malformed++;
+	spin_unlock_irqrestore(&afe->mius_stats_lock, flags);
+}
+
 static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *data)
 {
 	struct q6afe *afe = dev_get_drvdata(&adev->dev);
@@ -983,6 +1102,8 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 	const struct apr_hdr *hdr = &data->hdr;
 	struct q6afe_port *port;
 
+	if (afe->mius_observe && hdr->opcode == MIUS_EVENT_OPCODE)
+		q6afe_mius_observe_event(afe, data);
 	if (!data->payload_size)
 		return 0;
 
@@ -1068,6 +1189,16 @@ static int q6afe_callback(struct apr_device *adev, const struct apr_resp_pkt *da
 		wake_up(&afe->wait);
 		break;
 	default:
+		if (afe->mius_observe) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&afe->mius_stats_lock, flags);
+			afe->mius_stats.unknown_opcode++;
+			afe->mius_stats.last_opcode = hdr->opcode;
+			spin_unlock_irqrestore(&afe->mius_stats_lock, flags);
+			dev_info_ratelimited(afe->dev, "Unobserved AFE opcode %#x size %zu\n",
+					     hdr->opcode, (size_t)data->payload_size);
+		}
 		break;
 	}
 
@@ -2096,6 +2227,8 @@ static int q6afe_probe(struct apr_device *adev)
 {
 	struct q6afe *afe;
 	struct device *dev = &adev->dev;
+	struct dentry *entry;
+	char *name;
 
 	printk(KERN_ERR "%s:%d DBG\n", __func__, __LINE__);
 
@@ -2110,8 +2243,22 @@ static int q6afe_probe(struct apr_device *adev)
 	afe->dev = dev;
 	INIT_LIST_HEAD(&afe->port_list);
 	spin_lock_init(&afe->port_list_lock);
+	spin_lock_init(&afe->mius_stats_lock);
+	afe->mius_observe = of_machine_is_compatible("xiaomi,sweet");
 
 	dev_set_drvdata(dev, afe);
+	if (afe->mius_observe) {
+		name = devm_kasprintf(dev, GFP_KERNEL, "q6afe-%s", dev_name(dev));
+		if (name) {
+			entry = debugfs_create_dir(name, NULL);
+			if (!IS_ERR_OR_NULL(entry)) {
+				if (!devm_add_action_or_reset(dev,
+							     q6afe_mius_debugfs_remove, entry))
+					debugfs_create_file("mius", 0400, entry, afe,
+							    &q6afe_mius_stats_fops);
+			}
+		}
+	}
 
 	printk(KERN_ERR "%s:%d DBG\n", __func__, __LINE__);
 	return devm_of_platform_populate(dev);
