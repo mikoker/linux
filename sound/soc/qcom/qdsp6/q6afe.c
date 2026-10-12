@@ -32,9 +32,7 @@
 #define MIUS_PARAM_ENABLE	1
 #define MIUS_PARAM_CONFIG	2
 #define MIUS_PARAM_CALIBRATION	7
-#define MIUS_CONFIG_MICROPHONE_INDEX	4
-#define MIUS_CONFIG_SUSPEND		32
-#define MIUS_CONFIG_EXTERNAL_EVENT	35
+#define MIUS_PARAM_SUSPEND	6
 #define MIUS_CONFIG_RX_DEVICE	43
 #define MIUS_TX_PSEUDOPORT	0x8002
 #define AFE_PSEUDOPORT_CMD_START	0x000100cf
@@ -1383,36 +1381,18 @@ EXPORT_SYMBOL_GPL(q6afe_port_mius_calibration);
 int q6afe_port_mius_enable(struct q6afe_port *port, bool enable)
 {
 	__le32 payload[4] = { cpu_to_le32(enable), 0, 0, 0 };
-	__le32 microphone[3] = { cpu_to_le32(MIUS_CONFIG_MICROPHONE_INDEX), 0, 0 };
-	__le32 awake[3] = { cpu_to_le32(MIUS_CONFIG_SUSPEND), 0, 0 };
-	__le32 screen_on[3] = { cpu_to_le32(MIUS_CONFIG_EXTERNAL_EVENT),
-			       cpu_to_le32(1), 0 };
 	int ret;
 
 	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
 		return -EINVAL;
 
-	/* Sweet's mixer defaults explicitly select input 0 and clear suspend. */
-	if (enable) {
-		ret = q6afe_port_set_param_v2(port, microphone, MIUS_PARAM_CONFIG,
-					      MIUS_MODULE_TX, sizeof(microphone));
-		if (ret)
-			return ret;
-		ret = q6afe_port_set_param_v2(port, awake, MIUS_PARAM_CONFIG,
-					      MIUS_MODULE_TX, sizeof(awake));
-		if (ret)
-			return ret;
-	}
-
-	/* The caller owns the port and must disable before tearing it down. */
 	ret = q6afe_port_set_param_v2(port, payload, MIUS_PARAM_ENABLE,
 				      MIUS_MODULE_TX, sizeof(payload));
 	if (ret || !enable)
 		return ret;
 
-	/* Sweet's OEM ultrasound-screen-on route sends external event 1. */
-	return q6afe_port_set_param_v2(port, screen_on, MIUS_PARAM_CONFIG,
-				     MIUS_MODULE_TX, sizeof(screen_on));
+	/* Sweet firmware handles resume as parameter 6, not config type 32. */
+	return q6afe_port_mius_resume(port);
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_enable);
 
@@ -1431,14 +1411,11 @@ EXPORT_SYMBOL_GPL(q6afe_port_mius_rx_device);
 
 int q6afe_port_mius_diagnostics(struct q6afe_port *port)
 {
-	/* OEM MSC_ENGINE_DIAGNOSTICS strobe, not an engine configuration. */
-	__le32 payload[3] = { cpu_to_le32(15), 0, 0 };
-
 	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
 		return -EINVAL;
 
-	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_CONFIG,
-				     MIUS_MODULE_TX, sizeof(payload));
+	/* This firmware silently ignores config type 15 despite an APR ACK. */
+	return -EOPNOTSUPP;
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_diagnostics);
 
@@ -1450,7 +1427,7 @@ int q6afe_port_mius_resume(struct q6afe_port *port)
 	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
 		return -EINVAL;
 
-	return q6afe_port_set_param_v2(port, payload, 6,
+	return q6afe_port_set_param_v2(port, payload, MIUS_PARAM_SUSPEND,
 				     MIUS_MODULE_TX, sizeof(payload));
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_resume);
