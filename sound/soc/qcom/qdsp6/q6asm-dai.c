@@ -429,11 +429,14 @@ static int q6asm_dai_open(struct snd_soc_component *component,
 		dev_err(dev, "constraint for period bytes step ret = %d\n",
 								ret);
 	}
-	ret = snd_pcm_hw_constraint_step(runtime, 0,
-		SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 480);
-	if (ret < 0) {
-		dev_err(dev, "constraint for buffer bytes step ret = %d\n",
-								ret);
+	/* Sweet's MIUS capture uses four 1024-frame periods at 96 kHz. */
+	if (!(of_machine_is_compatible("xiaomi,sweet") &&
+	      stream_id == MSM_FRONTEND_DAI_MULTIMEDIA3 &&
+	      substream->stream == SNDRV_PCM_STREAM_CAPTURE)) {
+		ret = snd_pcm_hw_constraint_step(runtime, 0,
+			SNDRV_PCM_HW_PARAM_BUFFER_SIZE, 480);
+		if (ret < 0)
+			dev_err(dev, "constraint for buffer bytes step ret = %d\n", ret);
 	}
 
 	runtime->private_data = prtd;
@@ -443,6 +446,11 @@ static int q6asm_dai_open(struct snd_soc_component *component,
 		runtime->dma_bytes = q6asm_dai_hardware_playback.buffer_bytes_max;
 	} else {
 		snd_soc_set_runtime_hwparams(substream, &q6asm_dai_hardware_capture);
+		if (of_machine_is_compatible("xiaomi,sweet") &&
+		    stream_id == MSM_FRONTEND_DAI_MULTIMEDIA3) {
+			runtime->hw.rates |= SNDRV_PCM_RATE_96000;
+			runtime->hw.rate_max = 96000;
+		}
 		runtime->dma_bytes = q6asm_dai_hardware_capture.buffer_bytes_max;
 	}
 
@@ -1279,6 +1287,11 @@ static int of_q6asm_parse_dai_data(struct device *dev,
 
 		dai_drv = &pdata->dais[idx++];
 		*dai_drv = q6asm_fe_dais_template[id];
+		if (of_machine_is_compatible("xiaomi,sweet") &&
+		    id == MSM_FRONTEND_DAI_MULTIMEDIA3) {
+			dai_drv->capture.rates |= SNDRV_PCM_RATE_96000;
+			dai_drv->capture.rate_max = 96000;
+		}
 
 		ret = of_property_read_u32(node, "direction", &dir);
 		if (ret)
