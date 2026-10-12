@@ -218,11 +218,16 @@ static int q6afe_mius_diagnostics_put(struct snd_kcontrol *kcontrol,
 	if (!data->port[TX_CODEC_DMA_TX_4])
 		return -ENODEV;
 
-	ret = q6afe_port_mius_diagnostics(data->port[TX_CODEC_DMA_TX_4]);
+	if (kcontrol->private_value == 6)
+		ret = q6afe_port_mius_resume(data->port[TX_CODEC_DMA_TX_4]);
+	else
+		ret = q6afe_port_mius_diagnostics(data->port[TX_CODEC_DMA_TX_4]);
 	return ret ?: 1;
 }
 
 static const struct snd_kcontrol_new q6afe_mius_controls[] = {
+	SOC_SINGLE_BOOL_EXT("MIUS Resume Test", 6,
+			    q6afe_mius_diagnostics_get, q6afe_mius_diagnostics_put),
 	SOC_SINGLE_BOOL_EXT("MIUS Request Diagnostics", 0,
 			    q6afe_mius_diagnostics_get, q6afe_mius_diagnostics_put),
 	SND_SOC_BYTES_EXT("MIUS Calibration Data", 56,

@@ -1442,6 +1442,19 @@ int q6afe_port_mius_diagnostics(struct q6afe_port *port)
 }
 EXPORT_SYMBOL_GPL(q6afe_port_mius_diagnostics);
 
+int q6afe_port_mius_resume(struct q6afe_port *port)
+{
+	/* OEM Mi_Ultrasound Suspend=0 uses parameter 6, not config type 32. */
+	__le32 payload[4] = {};
+
+	if (port->id != AFE_PORT_ID_TX_CODEC_DMA_TX_4)
+		return -EINVAL;
+
+	return q6afe_port_set_param_v2(port, payload, 6,
+				     MIUS_MODULE_TX, sizeof(payload));
+}
+EXPORT_SYMBOL_GPL(q6afe_port_mius_resume);
+
 int q6afe_port_mius_tx(struct q6afe_port *port, bool enable)
 {
 	struct {
